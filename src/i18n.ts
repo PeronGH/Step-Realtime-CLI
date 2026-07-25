@@ -1,0 +1,669 @@
+/**
+ * 界面文案 i18n：模块级单例 locale store。
+ *
+ * 只覆盖给人看的 UI 文案（TUI 组件、App 提示、CLI 输出）；
+ * 给模型看的文案（工具 describe、system prompt、deny reason、tool_result）恒中文，不进本表。
+ *
+ * 文案生产者一大半在 React 树外（commands.ts、workingTips.ts、agent/loop.ts、main.tsx），
+ * React context 覆盖不到，故用模块级变量而非 context（ink 单进程单实例，无并发问题）。
+ *
+ * key 用点分命名（如 `approval.title`），插值用 `{name}` 占位。
+ * 查表顺序：当前 locale 表 → zh 表 → key 本身（开发期易发现漏翻）。
+ * zh 值必须与既有硬编码中文逐字符一致——默认 zh 下渲染结果不许有任何变化。
+ */
+
+export type Locale = 'zh' | 'en';
+
+/** 中文表（基准表，en 表 key 集合必须与之逐一对齐，由类型与测试双重强制）。 */
+const zh = {
+  // --- 审批对话（ApprovalPrompt）---
+  'approval.title': '需要确认：即将执行工具 {name}',
+  'approval.title.bash': '执行这条命令？',
+  'approval.title.write': '写入这个文件？',
+  'approval.title.edit': '应用这些修改？',
+  'approval.option.allowOnce': '允许一次（y）',
+  'approval.option.allowSession': '本会话都允许（a）',
+  'approval.option.deny': '拒绝（n）',
+  'approval.option.denyWithFeedback': '拒绝并写评论（f）',
+  'approval.hint.feedback': '输入拒绝原因 · Enter 提交 · Esc 直接拒绝',
+  'approval.hint.select': '↑/↓ 选择 · 1/2/3/4 或 y/a/n/f 直选 · Enter 确认 · Esc 拒绝',
+  // bash 危险命令警告（命中模式表后在命令上方红标显示）
+  'approval.danger.rmRf': '危险命令：递归强制删除（rm -rf）',
+  'approval.danger.sudo': '危险命令：将以 root 权限执行（sudo）',
+  'approval.danger.pipeShell': '危险命令：远程脚本直接管道执行（curl/wget | sh）',
+  'approval.danger.ddDevice': '危险命令：dd 直接写入块设备',
+  'approval.danger.mkfs': '危险命令：格式化文件系统（mkfs）',
+  'approval.danger.chmod777': '危险命令：开放全部权限（chmod 777）',
+  'approval.danger.rawDevice': '危险命令：重定向直接写入裸设备',
+  'approval.danger.forkBomb': '危险命令：疑似 fork 炸弹',
+  // ctrl+e 预览（edit diff / write 内容）
+  'approval.preview.more': '… 仅显示前 {shown}/{total} 行 · Ctrl+E 预览更多',
+  'approval.preview.collapse': '… 已展开全部 {total} 行 · Ctrl+E 收起',
+
+  // --- 询问用户（QuestionPrompt）---
+  'question.other': 'Other（自由输入）',
+  'question.counter': '(第 {index}/{total} 题) ',
+  'question.multiHint': '  （多选：空格勾选，Enter 提交）',
+  'question.otherPlaceholder': '输入自定义答案，回车提交',
+  'question.hint': '↑↓ 移动 · 数字键直选 · Enter 确认 · Esc 取消',
+
+  // --- 底部输入框（PromptInput）---
+  'input.placeholder.busy': '思考中…输入将加入发送队列',
+  'input.placeholder.idle': '输入指令，回车发送',
+  'input.tipPrefix': '  · 提示：{tip}',
+  'input.backtrackPrimed': '  · 再按一次 Esc 取回上一条消息编辑',
+  'input.exitPrimed': '  · 再按一次 Ctrl+C 退出',
+
+  // --- 欢迎框（WelcomeBox）---
+  'welcome.title': 'Welcome to Step Code!',
+  'welcome.helpHint': '输入 /help 查看命令',
+
+  // --- 工具调用行（ToolCall）---
+  'toolCall.elapsed': '  已运行 {s}s',
+  'toolCall.tooLong': '… 输出过长，仅显示前 {shown}/{total} 行',
+  'toolCall.moreLines': '… 还有 {count} 行 · Ctrl+O 展开',
+  'toolCall.collapsed': '{count} 行输出 · Ctrl+O 展开',
+
+  // --- 动态区视口（LiveViewport，滚动跳顶修复）---
+  'liveViewport.hiddenLines': '↑ 已隐藏 {count} 行早期输出',
+
+  // --- thinking（推理过程）---
+  'thinking.streaming': '思考中…',
+  'thinking.folded': '…（共 {count} 行）',
+
+  // --- 并行子 agent 面板（AgentGroup）---
+  'agentGroup.header.manyDone': '并行子 agent 完成：{total} 个{failed}',
+  'agentGroup.header.singleDone': '子 agent 已完成{failed}',
+  'agentGroup.header.manyRunning': '并行子 agent：{total} 个（{done} 完成，{running} 运行中{failed}）',
+  'agentGroup.header.singleRunning': '子 agent 运行中',
+  'agentGroup.failedSuffix': '（{count} 失败）',
+  'agentGroup.failedSuffixInline': '，{count} 失败',
+  'agentGroup.failedTag': '（失败）',
+  'agentGroup.status.done': '完成',
+  'agentGroup.status.error': '失败',
+  'agentGroup.status.running': '运行中',
+  'agentGroup.status.queued': '排队中',
+
+  // --- workflow 步骤面板（WorkflowPanel / ToolCall）---
+  'workflow.title': 'workflow「{name}」',
+  'workflow.summary': 'workflow「{name}」 {steps} 步 · {agents} 个子 agent',
+  'workflow.step.parallelTasks': '{count} 个并行任务',
+  'workflow.step.progress': '（{done}/{total} 完成）',
+  'workflow.step.runningInfo': '（运行中 · {count} tools）',
+
+  // --- 会话选择器（SessionPicker）与相对时间 ---
+  'time.justNow': '刚刚',
+  'time.minutesAgo': '{count} 分钟前',
+  'time.hoursAgo': '{count} 小时前',
+  'time.daysAgo': '{count} 天前',
+  'sessionPicker.title': '选择要恢复的会话（输入过滤 · ↑↓ 选择 · Enter 恢复 · Esc 新会话）',
+  'sessionPicker.count': '{count} 条',
+  'sessionPicker.searchPrefix': '搜索：',
+  'sessionPicker.searchPlaceholder': '输入过滤标题或首条消息…',
+  'sessionPicker.empty': '无匹配的会话（Esc 开新会话）',
+  'sessionPicker.pageInfo': '{start}-{end} / 共 {total} 个',
+
+  // --- 模型选择器（ModelPicker）---
+  'modelPicker.title': '选择模型',
+  'modelPicker.searchPrefix': '搜索：',
+  'modelPicker.searchPlaceholder': '输入过滤别名 / 显示名 / 渠道…',
+  'modelPicker.empty': '无匹配的模型',
+  'modelPicker.current': '← 当前',
+  'modelPicker.cacheWarning': '切换模型会使已有 prompt cache 失效，/new 开新会话可避免额外 token 消耗',
+  'modelPicker.hint': '↑/↓ 选择 · 输入过滤 · Enter 切换 · Esc 取消',
+
+  // --- TODO 面板（TodoPanel）---
+  'todo.title': '任务清单',
+  'todo.more': '… +{count} more',
+
+  // --- /lang 命令 ---
+  'lang.current': '当前界面语言：{lang}（可用：zh / en）',
+  'lang.switched': '界面语言已切换为：{lang}',
+  'lang.usage': '用法：/lang [zh|en]',
+
+  // --- 状态栏 hints（App 组装后传给 StatusBar）---
+  'status.hints': 'Ctrl+C 清空输入框 · Alt+V 贴图{imageCount} · /plan 计划模式{planMode} · Esc 中断 · /help 命令',
+  'status.imageCount': '({count})',
+  'status.planOn': '(开启)',
+
+  // --- 后台任务终态提示（App 注入通知时给用户看的行；给模型看的通知正文恒中文不进表）---
+  'background.settled': '⏱ 后台任务 {id} {status}：{command}',
+  'background.status.completed': '已完成',
+  'background.status.failed': '失败',
+  'background.status.killed': '已终止',
+
+  // --- App 会话与图片提示 ---
+  'app.resumed': '已恢复会话 {id}（{count} 条消息）。',
+  'exit.resumeHint': '恢复本会话：{command}',
+  'app.image.reading': '正在读取剪贴板图片…',
+  'app.image.none': '剪贴板里没有图片（或当前平台/终端不支持）。',
+  'app.image.attached': '已附加图片（共 {count} 张）。输入为空时按退格可删除最后一张。',
+  'app.image.removedMore': '已移除一张图片（剩 {count} 张）。',
+  'app.image.removedNone': '已移除图片，当前无附加图片。',
+  'app.image.banner': '🖼 已附加 {count} 张图片',
+  'app.image.bannerHint': '  （输入为空时按退格删除最后一张 · Alt+V 继续添加）',
+  'app.user.withImages': '（含 {count} 张图片）',
+
+  // --- App 发送队列与中断 ---
+  'app.queue.added': '已加入发送队列（第 {index} 条）：{text}',
+  'app.queue.restored': '已把发送队列的内容合并回输入框，可编辑后再发送。',
+  'app.queue.previewTitle': '📤 发送队列 {count} 条 · 回合结束后按序发送 · Esc 中断后立即发送',
+  'app.queue.previewMore': '  … 还有 {count} 条',
+  'app.aborted.resumeQueue': '已中断（Esc）。继续发送队列中的 {count} 条消息。',
+  'app.aborted.plain': '已中断（Esc）。会话历史已保留，可继续输入。',
+  'app.error.exportHint': '如需排查，可运行 /export-debug-zip 导出调试包发我们（请勿公开分享）',
+
+  // --- App 计划确认框与计划模式 ---
+  'app.plan.approved': '📋 已批准的计划：\n\n{plan}',
+  'app.plan.readyTitle': 'Ready to code? 计划如下：',
+  'app.plan.readyHintMiddle': ' 批准并执行 · ',
+  'app.plan.readyHintEnd': '/Esc 拒绝（反馈给模型修订）',
+  'app.plan.off': '计划模式已关闭，恢复执行。',
+  'app.plan.on': '计划模式已开启：我只做只读调查并产出计划，调 exit_plan_mode 提交你确认，批准后才执行。再次输入 /plan 可提前关闭。',
+
+  // --- App /model /provider /permission ---
+  'app.model.current': '当前模型：{model}',
+  'app.model.switched': '模型已切换为：{model}（下一轮请求生效）',
+  'app.model.aliasSwitched': '模型已切换为：{name} → {model}（下一轮请求生效）',
+  'app.model.switchFailed': '切换模型失败：{message}',
+  'app.model.busy': '会话进行中，无法切换模型。请等待当前回合结束后再试。',
+  'app.provider.current': '当前服务商：{provider}（可用：{list}）',
+  'app.provider.unknown': '未知服务商：{provider}（可用：{list}）',
+  'app.provider.switchFailed': '切换服务商失败：{message}',
+  'app.provider.presetModel': '，模型切到预设默认 {model}',
+  'app.provider.noPresetModel': '，该服务商无预设模型，请用 /model <名称> 指定',
+  'app.provider.switched': '服务商已切换为：{provider}{modelNote}（下一轮请求生效）',
+  'app.permission.switched': '权限模式已切换为：{mode}',
+  'app.permission.current': '当前权限模式：{mode}（可用：manual/auto/yolo）',
+  'app.permission.yolo': '权限模式已切换为：yolo（全部放行）',
+  'app.permission.auto': '权限模式已切换为：auto（写放行，bash 需确认）',
+
+  // --- App /goal /loop ---
+  'app.goal.none': '当前没有自主目标。告诉我你要达成什么目标，我会用 create_goal 设定并持续自主推进（达成或受阻时用 update_goal 报告）。',
+  'app.goal.usage': '用法：/goal 查看状态面板；/goal pause 暂停；/goal resume 恢复；/goal cancel 取消。',
+  'app.goal.overBudgetTurns': 'goal 已达轮次预算，已标记 blocked。/goal resume 可复活，但不调高预算会立刻再次 blocked。',
+  'app.goal.overBudgetTokens': 'goal 已达 token 预算，已标记 blocked。/goal resume 可复活，但不调高预算会立刻再次 blocked。',
+  'app.loop.none': '当前没有定时/循环任务。告诉我周期与要做的事（如"每 5 分钟检查一次 X"），我会用 cron_create 创建。',
+  'app.loop.jobLine': '{id} · {cron}{oneShot} · 下次 {next}',
+  'app.loop.oneShot': '（一次性）',
+  'app.loop.list': '定时/循环任务：\n{lines}',
+
+  // --- goal 面板 / 生命周期 marker / 状态栏 ---
+  'goalPanel.title': 'Goal · {status}',
+  'goalPanel.status.active': '进行中',
+  'goalPanel.status.paused': '已暂停',
+  'goalPanel.status.blocked': '已阻塞',
+  'goalPanel.criterion': '完成标准：{text}',
+  'goalPanel.summary': '状态 {status} · 用时 {elapsed} · 轮次 {turns}{tokens}',
+  'goalPanel.tokensSuffix': ' · token {tokens}',
+  'goalPanel.reason': '原因：{reason}',
+  'goal.marker.created': '● 目标已设定：{objective}',
+  'goal.marker.paused': '● 目标已暂停{reason}',
+  'goal.marker.active': '● 目标已恢复推进{reason}',
+  'goal.marker.blocked': '● 目标已阻塞{reason}',
+  'goal.reasonSuffix': '：{reason}',
+  'goal.complete': '✓ 目标完成{reason}。共 {turns} 轮，用时 {elapsed}。',
+  'goal.completeReason': ' — {reason}',
+  'goal.cancelReason': '用户取消',
+  'goal.blocked.turns': '已达轮次预算',
+  'goal.blocked.tokens': '已达 token 预算',
+  'goal.budgetWarning': '预算将尽：收敛收尾完成当前目标，不要开新的可选工作。',
+
+  // --- cron 触发卡片 ---
+  'cronCard.title': '定时任务触发',
+  'cronCard.oneShot': '一次性',
+  'cronCard.coalesced': '合并 {count} 次',
+
+  // --- App /mcp 状态面板 ---
+  'app.mcp.none': '未配置 MCP server。在 {path} 中添加 mcpServers 配置后重启即可接入。',
+  'app.mcp.title': 'MCP server 状态：',
+  'app.mcp.line.connected': '- {name}：已连接，{count} 个工具',
+  'app.mcp.line.pending': '- {name}：连接中…',
+  'app.mcp.line.failed': '- {name}：连接失败：{error}',
+  'app.mcp.line.disabled': '- {name}：已禁用',
+
+  // --- App /fork /new /compact /reflect /export-debug-zip ---
+  'app.fork.busy': '会话进行中，无法 fork。请等待当前回合结束后再试。',
+  'app.fork.done': '已从会话 {from} fork 出新会话 {to}（保留 {messages} 条历史、{todos} 项任务）。原会话不受影响。',
+  'app.new.started': '已开始新会话 {id}。',
+  'app.compact.running': '正在压缩上下文…',
+  'app.compact.done': '上下文已压缩：约 {before} → {after} tokens（估算）。',
+  'app.compact.failed': '压缩失败：{message}',
+  'app.reflect.running': '正在回顾完整对话历史、提炼可复用的方法论经验…',
+  'app.reflect.done': '📝 对话经验沉淀（{count} 条历史）：\n\n{text}',
+  'app.reflect.failed': '回顾失败：{message}',
+  'app.export.busy': '会话进行中，导出请等当前回合结束后再试。',
+  'app.export.running': '正在打包调试 zip（当前会话 + 脱敏配置 + 运行日志现场）…',
+  'app.export.done': '已导出调试包：{path}\n包含：{files}\n{warning}',
+  'app.export.warning': '⚠️ 里面含会话正文与脱敏后的配置，正文脱敏为尽力而为、不保证完全。请勿公开分享，仅私下发给我们排查。',
+  'app.export.failed': '导出调试包失败：{message}',
+
+  // --- App /sessions /resume（main.tsx sessions 子命令复用 app.sessions.none / app.sessions.untitled / app.resume.notFound）---
+  'app.sessions.none': '本工作目录暂无历史会话。',
+  'app.sessions.untitled': '(无标题)',
+  'app.sessions.line': '{mark}{id}  {title}  {count} 条  {updated}',
+  'app.sessions.list': '历史会话（* 为当前）：\n{lines}\n可用 /resume <id> 切换到指定会话。',
+  'app.resume.list': '历史会话（* 为当前）：\n{lines}\n输入 /resume <id> 切换。',
+  'app.resume.busy': '会话进行中，无法切换。等当前回合结束再试。',
+  'app.resume.notFound': '未找到会话 {id}',
+  'app.resume.switched': '已切换到会话 {id}（{count} 条历史）。',
+  'app.unknownCommand': '未知命令：{command}（输入 /help 查看可用命令）',
+  'app.skill.list': '可用技能：{names}\n用 /skill <名称> [参数] 激活。',
+  'app.skill.none': '暂无可用技能。把 SKILL.md 放到 .step-code/skills/ 或 .agents/skills/ 下即可。',
+  'app.skill.noneShort': '（无）',
+  'app.skill.unknown': '未知技能「{name}」。可用：{names}',
+  'app.skill.activated': '已激活技能「{name}」，正在按其指令执行……',
+  'app.agent.activityError': '错误:{message}',
+
+  // --- App /plugin 管理命令与 plugin 命名空间命令 ---
+  'app.plugin.usage': '用法：/plugin [list] · /plugin install <本地目录> · /plugin enable <id> · /plugin disable <id> · /plugin remove <id> · /plugin info <id>',
+  'app.plugin.list.empty': '暂无已安装的 plugin。用 /plugin install <本地目录> 安装。',
+  'app.plugin.list.title': '已安装 plugin：',
+  'app.plugin.list.line': '- {id}（{name}@{version}）{status}{caps}',
+  'app.plugin.list.errorLine': '- {id}：error（manifest 解析失败，不影响启动与其他 plugin）',
+  'app.plugin.status.enabled': '启用',
+  'app.plugin.status.disabled': '已禁用',
+  'app.plugin.installed': '已安装 plugin「{id}」。重启后生效。',
+  'app.plugin.installFailed': '安装失败：{error}',
+  'app.plugin.enabled': '已启用 plugin「{id}」。/new 或重启后生效。',
+  'app.plugin.disabled': '已禁用 plugin「{id}」。/new 或重启后生效。',
+  'app.plugin.removed': '已移除 plugin「{id}」。重启后完全生效。',
+  'app.plugin.removeFailed': '移除失败：{error}',
+  'app.plugin.notFound': '未找到 plugin「{id}」。',
+  'app.plugin.info': 'plugin「{id}」\n名称：{name}  版本：{version}\n描述：{desc}\n目录：{root}\n状态：{status}\n能力：skills {skills} · MCP {mcp} · hooks {hooks} · commands {commands}{commandList}{ignored}',
+  'app.plugin.info.commands': '\n命令：{names}',
+  'app.plugin.info.ignored': '\n已忽略的执行型字段：{fields}',
+  'app.plugin.info.error': 'plugin「{id}」：error（manifest 解析失败）。可用 /plugin remove {id} 移除。',
+  'app.plugin.command.invoked': '已执行 plugin 命令「{name}」，正在按其指令执行……',
+
+  // --- 斜杠命令 describe（commands.ts；cmd.helpText.* 为 /help 拼接模板）---
+  'cmd.help': '显示可用命令',
+  'cmd.model': '显示或切换模型：/model [名称]',
+  'cmd.permission': '显示或设置权限模式：/permission [manual|auto|yolo]',
+  'cmd.yolo': '切到 yolo 模式（全部放行）',
+  'cmd.auto': '切到 auto 模式（写放行，bash 需确认）',
+  'cmd.plan': '切换计划模式：只读调查并产出计划，经你确认后才执行',
+  'cmd.provider': '显示或切换服务商：/provider [stepfun|anthropic|openai|openai_responses]',
+  'cmd.goal': '查看/引导自主目标：让 agent 持续朝一个目标推进',
+  'cmd.loop': '查看/创建定时或循环任务（cron）',
+  'cmd.fork': '从当前会话分叉出新会话副本（保留当前历史与任务清单），原会话不动',
+  'cmd.new': '开始新会话（清空上下文并新建会话记录）',
+  'cmd.compact': '压缩上下文：把较早对话总结为摘要以腾出窗口',
+  'cmd.reflect': '回顾完整对话历史，沉淀可复用的方法论经验（打印到终端）',
+  'cmd.export-debug-zip': '导出调试 zip（发给我们排查 bug，请勿公开分享）',
+  'cmd.sessions': '列出本工作目录下的历史会话',
+  'cmd.resume': '切换到指定历史会话：/resume <id>（不带 id 列出可选会话）',
+  'cmd.lang': '显示或切换界面语言：/lang [zh|en]',
+  'cmd.mcp': '查看 MCP server 连接状态与工具数',
+  'cmd.skill': '激活技能或列出可用技能：/skill [名称] [参数]',
+  'cmd.plugin': '管理 plugin：/plugin [list|install|enable|disable|remove|info]',
+  'cmd.exit': '退出 Step Code',
+  'cmd.helpText.aliasSuffix': '（/{aliases}）',
+  'cmd.helpText.line': '/{name}{alias} — {describe}',
+
+  // --- main.tsx CLI 输出（sessions 子命令 / mcp / 非交互 / reflect）---
+  'cli.sessions.line': '{id}  {title}  {updated}  {count} 条',
+  'cli.sessions.showUsage': '用法：step sessions show <id>',
+  'cli.sessions.label.title': '标题: ',
+  'cli.sessions.label.model': '模型: ',
+  'cli.sessions.label.created': '创建: ',
+  'cli.sessions.label.updated': '更新: ',
+  'cli.sessions.label.count': '条数: ',
+  'cli.sessions.deleteUsage': '用法：step sessions delete <id>',
+  'cli.sessions.deleted': '已删除会话 {id}',
+  'cli.sessions.deleteFailed': '删除失败或会话不存在：{id}',
+  'cli.sessions.unknownSub': '未知子命令：{sub}（可用：list / show <id> / delete <id>）',
+  'cli.mcp.connectFailed': '[mcp] 连接 {name} 失败：{message}',
+  'cli.print.aborted': '已中断',
+  'cli.reflect.noHistory': '没有可回顾的对话历史。请配合 -c（最近会话）或 --session <id> 指定一个有历史的会话。',
+  'cli.reflect.running': '[reflect] 正在回顾 {count} 条历史、提炼可复用方法论经验…',
+
+  // --- agent 循环经 notice/error 事件显示给用户的提示 ---
+  'loop.overflow.noCompact': '上下文超出模型窗口，且无法进一步压缩。请用 /compact 或 /new 重开会话。',
+  'loop.overflow.nothing': '上下文超出模型窗口，且无可压缩内容。请用 /new 重开会话。',
+  'loop.overflow.retried': '上下文溢出，已压缩历史后重试本回合。',
+  'loop.maxTokens.truncated': '模型输出达到 max_tokens 上限被截断，截断处的工具调用未执行。可回复「继续」让我接着输出，或在 config.toml 调高 max_tokens。',
+  'loop.maxTokens.truncatedWithLimit': '模型输出达到 max_tokens 上限（{limit}）被截断，截断处的工具调用未执行。可回复「继续」让我接着输出，或在 config.toml 调高 max_tokens。',
+  'loop.autoCompacted': '上下文接近上限，已自动压缩历史。',
+  'loop.maxIterations': '已达最大往返轮数（{max}），中止本次交互。',
+  'turn.retry': '请求失败，{delay}ms 后重试（第 {attempt}/{max} 次）',
+  'turn.incomplete': '模型请求未能完成。',
+  'turn.subagentRequeue': '子 agent 请求被限流（429），{delay}ms 后重排队尾重试（第 {attempt}/{max} 次）',
+  // --- 用户可配置 hooks 的执行可见性（开始/阻断/超时/异常，经 notice 条目显示）---
+  'hook.notice.start': '[hook] {event} 执行：{command}',
+  'hook.notice.blocked': '[hook] {event} 阻断：{reason}',
+  'hook.notice.timeout': '[hook] {event} 超时（{timeout}s），已放行：{command}',
+  'hook.notice.failed': '[hook] {event} 异常（{detail}），已放行：{command}',
+  'hook.blocked.noReason': '（hook 未给出原因）',
+
+  // --- 错误码 → 建议用户动作（附加在 error 事件文案后；最小目录，见 errorAdvice）---
+  'error.advice.auth': '建议：API key 无效或权限不足，请检查 STEP_CODE_API_KEY 环境变量或 config.toml 中的 key 配置。',
+  'error.advice.rateLimit': '建议：限流持续存在，请稍后重试，或检查账户配额。',
+
+  // --- provider 工厂（main.tsx 在 setLocale 之后调用，翻得到）---
+  'factory.unknownProvider': "未知服务商 provider='{provider}'。当前支持：{list}。",
+} as const;
+
+/** 英文表：key 与 zh 一一对应（类型级强制，漏 key 直接编译报错）。 */
+const en: Record<keyof typeof zh, string> = {
+  'approval.title': 'Approval needed: about to run tool {name}',
+  'approval.title.bash': 'Run this command?',
+  'approval.title.write': 'Write this file?',
+  'approval.title.edit': 'Apply these changes?',
+  'approval.option.allowOnce': 'Allow once (y)',
+  'approval.option.allowSession': 'Allow for this session (a)',
+  'approval.option.deny': 'Deny (n)',
+  'approval.option.denyWithFeedback': 'Deny with feedback (f)',
+  'approval.hint.feedback': 'Type rejection reason · Enter to submit · Esc to deny',
+  'approval.hint.select': '↑/↓ select · 1/2/3/4 or y/a/n/f · Enter confirm · Esc deny',
+  'approval.danger.rmRf': 'Dangerous: recursive force delete (rm -rf)',
+  'approval.danger.sudo': 'Dangerous: runs with root privileges (sudo)',
+  'approval.danger.pipeShell': 'Dangerous: remote script piped to shell (curl/wget | sh)',
+  'approval.danger.ddDevice': 'Dangerous: dd writes directly to a block device',
+  'approval.danger.mkfs': 'Dangerous: formats a filesystem (mkfs)',
+  'approval.danger.chmod777': 'Dangerous: grants all permissions (chmod 777)',
+  'approval.danger.rawDevice': 'Dangerous: redirect writes directly to a raw device',
+  'approval.danger.forkBomb': 'Dangerous: suspected fork bomb',
+  'approval.preview.more': '… showing first {shown}/{total} lines · Ctrl+E to preview more',
+  'approval.preview.collapse': '… all {total} lines shown · Ctrl+E to collapse',
+
+  'question.other': 'Other (free input)',
+  'question.counter': '(Question {index}/{total}) ',
+  'question.multiHint': '  (multi-select: Space to toggle, Enter to submit)',
+  'question.otherPlaceholder': 'Type a custom answer, Enter to submit',
+  'question.hint': '↑↓ move · number keys select · Enter confirm · Esc cancel',
+
+  'input.placeholder.busy': 'Thinking… input will join the send queue',
+  'input.placeholder.idle': 'Type a command, Enter to send',
+  'input.tipPrefix': '  · Tip: {tip}',
+  'input.backtrackPrimed': '  · Press Esc again to edit your previous message',
+  'input.exitPrimed': '  · Press Ctrl+C again to exit',
+
+  'welcome.title': 'Welcome to Step Code!',
+  'welcome.helpHint': 'Type /help to see commands',
+
+  'toolCall.elapsed': '  running {s}s',
+  'toolCall.tooLong': '… output too long, showing first {shown}/{total} lines',
+  'toolCall.moreLines': '… {count} more lines · Ctrl+O to expand',
+  'toolCall.collapsed': '{count} lines of output · Ctrl+O to expand',
+
+  'liveViewport.hiddenLines': '↑ {count} earlier lines hidden',
+
+  'thinking.streaming': 'Thinking…',
+  'thinking.folded': '… ({count} lines total)',
+
+  'agentGroup.header.manyDone': 'Parallel subagents done: {total}{failed}',
+  'agentGroup.header.singleDone': 'Subagent finished{failed}',
+  'agentGroup.header.manyRunning': 'Parallel subagents: {total} ({done} done, {running} running{failed})',
+  'agentGroup.header.singleRunning': 'Subagent running',
+  'agentGroup.failedSuffix': ' ({count} failed)',
+  'agentGroup.failedSuffixInline': ', {count} failed',
+  'agentGroup.failedTag': ' (failed)',
+  'agentGroup.status.done': 'done',
+  'agentGroup.status.error': 'failed',
+  'agentGroup.status.running': 'running',
+  'agentGroup.status.queued': 'queued',
+
+  'workflow.title': 'workflow "{name}"',
+  'workflow.summary': 'workflow "{name}" · {steps} steps · {agents} subagents',
+  'workflow.step.parallelTasks': '{count} parallel tasks',
+  'workflow.step.progress': ' ({done}/{total} done)',
+  'workflow.step.runningInfo': ' (running · {count} tools)',
+
+  'time.justNow': 'just now',
+  'time.minutesAgo': '{count} min ago',
+  'time.hoursAgo': '{count} hr ago',
+  'time.daysAgo': '{count} days ago',
+  'sessionPicker.title': 'Select a session to resume (type to filter · ↑↓ select · Enter resume · Esc new session)',
+  'sessionPicker.count': '{count} msgs',
+  'sessionPicker.searchPrefix': 'Search: ',
+  'sessionPicker.searchPlaceholder': 'type to filter title or first message…',
+  'sessionPicker.empty': 'No matching sessions (Esc for new session)',
+  'sessionPicker.pageInfo': '{start}-{end} of {total}',
+
+  'modelPicker.title': 'Select a model',
+  'modelPicker.searchPrefix': 'Search: ',
+  'modelPicker.searchPlaceholder': 'type to filter alias / display name / provider…',
+  'modelPicker.empty': 'No matching models',
+  'modelPicker.current': '← current',
+  'modelPicker.cacheWarning': 'Switching models invalidates the existing prompt cache; start a new session with /new to avoid extra token cost',
+  'modelPicker.hint': '↑/↓ select · type to filter · Enter switch · Esc cancel',
+
+  'todo.title': 'Tasks',
+  'todo.more': '… +{count} more',
+
+  'lang.current': 'Current UI language: {lang} (available: zh / en)',
+  'lang.switched': 'UI language switched to: {lang}',
+  'lang.usage': 'Usage: /lang [zh|en]',
+
+  'status.hints': 'Ctrl+C clear input · Alt+V paste image{imageCount} · /plan plan mode{planMode} · Esc abort · /help commands',
+  'status.imageCount': ' ({count})',
+  'status.planOn': ' (on)',
+
+  'background.settled': '⏱ Background task {id} {status}: {command}',
+  'background.status.completed': 'completed',
+  'background.status.failed': 'failed',
+  'background.status.killed': 'killed',
+
+  'app.resumed': 'Resumed session {id} ({count} messages).',
+  'exit.resumeHint': 'To resume this session: {command}',
+  'app.image.reading': 'Reading clipboard image…',
+  'app.image.none': 'No image in clipboard (or unsupported on this platform/terminal).',
+  'app.image.attached': 'Image attached ({count} total). Backspace with empty input removes the last one.',
+  'app.image.removedMore': 'Removed one image ({count} left).',
+  'app.image.removedNone': 'Image removed; no images attached now.',
+  'app.image.banner': '🖼 {count} images attached',
+  'app.image.bannerHint': '  (Backspace with empty input removes the last · Alt+V to add more)',
+  'app.user.withImages': ' (with {count} images)',
+
+  'app.queue.added': 'Added to send queue (#{index}): {text}',
+  'app.queue.restored': 'Queued messages merged back into the input box; edit before sending.',
+  'app.queue.previewTitle': '📤 Send queue {count} · sent in order at end of turn · Esc interrupts and sends now',
+  'app.queue.previewMore': '  … {count} more',
+  'app.aborted.resumeQueue': 'Aborted (Esc). Continuing with {count} queued messages.',
+  'app.aborted.plain': 'Aborted (Esc). History kept; you can keep typing.',
+  'app.error.exportHint': 'To troubleshoot, run /export-debug-zip and send us the bundle (do not share publicly)',
+
+  'app.plan.approved': '📋 Approved plan:\n\n{plan}',
+  'app.plan.readyTitle': 'Ready to code? Plan as follows:',
+  'app.plan.readyHintMiddle': ' approve and execute · ',
+  'app.plan.readyHintEnd': '/Esc reject (feedback goes back to the model for revision)',
+  'app.plan.off': 'Plan mode off; resuming execution.',
+  'app.plan.on': 'Plan mode on: I will only investigate read-only and produce a plan, submit it via exit_plan_mode for your confirmation, and execute only after approval. Type /plan again to turn it off early.',
+
+  'app.model.current': 'Current model: {model}',
+  'app.model.switched': 'Model switched to: {model} (takes effect next turn)',
+  'app.model.aliasSwitched': 'Model switched to: {name} → {model} (takes effect next turn)',
+  'app.model.switchFailed': 'Failed to switch model: {message}',
+  'app.model.busy': 'Session busy; cannot switch model. Wait for the current turn to finish.',
+  'app.provider.current': 'Current provider: {provider} (available: {list})',
+  'app.provider.unknown': 'Unknown provider: {provider} (available: {list})',
+  'app.provider.switchFailed': 'Failed to switch provider: {message}',
+  'app.provider.presetModel': ', model set to preset default {model}',
+  'app.provider.noPresetModel': ', this provider has no preset model; set one with /model <name>',
+  'app.provider.switched': 'Provider switched to: {provider}{modelNote} (takes effect next turn)',
+  'app.permission.switched': 'Permission mode switched to: {mode}',
+  'app.permission.current': 'Current permission mode: {mode} (available: manual/auto/yolo)',
+  'app.permission.yolo': 'Permission mode switched to: yolo (allow all)',
+  'app.permission.auto': 'Permission mode switched to: auto (writes allowed, bash needs approval)',
+
+  'app.goal.none': 'No active goal. Tell me what you want to achieve and I will set it with create_goal and keep pushing autonomously (reporting with update_goal when done or blocked).',
+  'app.goal.usage': 'Usage: /goal to view the status panel; /goal pause; /goal resume; /goal cancel.',
+  'app.goal.overBudgetTurns': 'Goal hit its turn budget; marked blocked. /goal resume revives it, but without raising the budget it will block again immediately.',
+  'app.goal.overBudgetTokens': 'Goal hit its token budget; marked blocked. /goal resume revives it, but without raising the budget it will block again immediately.',
+  'app.loop.none': 'No scheduled/loop tasks. Tell me the period and the task (e.g. "check X every 5 minutes") and I will create it with cron_create.',
+  'app.loop.jobLine': '{id} · {cron}{oneShot} · next {next}',
+  'app.loop.oneShot': ' (one-shot)',
+  'app.loop.list': 'Scheduled/loop tasks:\n{lines}',
+
+  'goalPanel.title': 'Goal · {status}',
+  'goalPanel.status.active': 'active',
+  'goalPanel.status.paused': 'paused',
+  'goalPanel.status.blocked': 'blocked',
+  'goalPanel.criterion': 'Criterion: {text}',
+  'goalPanel.summary': 'status {status} · elapsed {elapsed} · turns {turns}{tokens}',
+  'goalPanel.tokensSuffix': ' · tokens {tokens}',
+  'goalPanel.reason': 'Reason: {reason}',
+  'goal.marker.created': '● Goal set: {objective}',
+  'goal.marker.paused': '● Goal paused{reason}',
+  'goal.marker.active': '● Goal resumed{reason}',
+  'goal.marker.blocked': '● Goal blocked{reason}',
+  'goal.reasonSuffix': ': {reason}',
+  'goal.complete': '✓ Goal complete{reason}. {turns} turns over {elapsed}.',
+  'goal.completeReason': ' — {reason}',
+  'goal.cancelReason': 'cancelled by user',
+  'goal.blocked.turns': 'turn budget exhausted',
+  'goal.blocked.tokens': 'token budget exhausted',
+  'goal.budgetWarning': 'Budget nearly exhausted: converge and wrap up the current goal; do not start new optional work.',
+
+  'cronCard.title': 'Scheduled task fired',
+  'cronCard.oneShot': 'one-shot',
+  'cronCard.coalesced': '{count} fires coalesced',
+
+  'app.mcp.none': 'No MCP servers configured. Add mcpServers to {path} and restart.',
+  'app.mcp.title': 'MCP server status:',
+  'app.mcp.line.connected': '- {name}: connected, {count} tools',
+  'app.mcp.line.pending': '- {name}: connecting…',
+  'app.mcp.line.failed': '- {name}: failed: {error}',
+  'app.mcp.line.disabled': '- {name}: disabled',
+
+  'app.fork.busy': 'Session busy; cannot fork. Wait for the current turn to finish.',
+  'app.fork.done': 'Forked session {from} into new session {to} (kept {messages} messages, {todos} tasks). The original session is untouched.',
+  'app.new.started': 'Started new session {id}.',
+  'app.compact.running': 'Compacting context…',
+  'app.compact.done': 'Context compacted: ~{before} → {after} tokens (estimated).',
+  'app.compact.failed': 'Compaction failed: {message}',
+  'app.reflect.running': 'Reviewing full conversation history, distilling reusable methodology…',
+  'app.reflect.done': '📝 Lessons from this conversation ({count} messages):\n\n{text}',
+  'app.reflect.failed': 'Reflect failed: {message}',
+  'app.export.busy': 'Session busy; export after the current turn finishes.',
+  'app.export.running': 'Packing debug zip (current session + redacted config + run logs)…',
+  'app.export.done': 'Debug bundle exported: {path}\nIncludes: {files}\n{warning}',
+  'app.export.warning': '⚠️ It contains the session transcript and redacted config; redaction is best-effort, not guaranteed complete. Do not share publicly; send it to us privately for troubleshooting.',
+  'app.export.failed': 'Failed to export debug bundle: {message}',
+
+  'app.sessions.none': 'No past sessions in this working directory.',
+  'app.sessions.untitled': '(untitled)',
+  'app.sessions.line': '{mark}{id}  {title}  {count} msgs  {updated}',
+  'app.sessions.list': 'Past sessions (* = current):\n{lines}\nUse /resume <id> to switch to a session.',
+  'app.resume.list': 'Past sessions (* = current):\n{lines}\nType /resume <id> to switch.',
+  'app.resume.busy': 'Session busy; cannot switch. Try again after the current turn.',
+  'app.resume.notFound': 'Session {id} not found',
+  'app.resume.switched': 'Switched to session {id} ({count} messages).',
+  'app.unknownCommand': 'Unknown command: {command} (type /help to see available commands)',
+  'app.skill.list': 'Available skills: {names}\nActivate with /skill <name> [args].',
+  'app.skill.none': 'No skills available. Put a SKILL.md under .step-code/skills/ or .agents/skills/.',
+  'app.skill.noneShort': '(none)',
+  'app.skill.unknown': 'Unknown skill "{name}". Available: {names}',
+  'app.skill.activated': 'Activated skill "{name}", following its instructions…',
+  'app.agent.activityError': 'error:{message}',
+
+  // --- App /plugin management & plugin-namespaced commands ---
+  'app.plugin.usage': 'Usage: /plugin [list] · /plugin install <local dir> · /plugin enable <id> · /plugin disable <id> · /plugin remove <id> · /plugin info <id>',
+  'app.plugin.list.empty': 'No plugins installed. Install one with /plugin install <local dir>.',
+  'app.plugin.list.title': 'Installed plugins:',
+  'app.plugin.list.line': '- {id} ({name}@{version}) {status}{caps}',
+  'app.plugin.list.errorLine': '- {id}: error (manifest parse failed; does not affect startup or other plugins)',
+  'app.plugin.status.enabled': 'enabled',
+  'app.plugin.status.disabled': 'disabled',
+  'app.plugin.installed': 'Installed plugin "{id}". Takes effect after restart.',
+  'app.plugin.installFailed': 'Install failed: {error}',
+  'app.plugin.enabled': 'Enabled plugin "{id}". Takes effect after /new or restart.',
+  'app.plugin.disabled': 'Disabled plugin "{id}". Takes effect after /new or restart.',
+  'app.plugin.removed': 'Removed plugin "{id}". Fully effective after restart.',
+  'app.plugin.removeFailed': 'Remove failed: {error}',
+  'app.plugin.notFound': 'Plugin "{id}" not found.',
+  'app.plugin.info': 'plugin "{id}"\nName: {name}  Version: {version}\nDescription: {desc}\nDirectory: {root}\nStatus: {status}\nCapabilities: skills {skills} · MCP {mcp} · hooks {hooks} · commands {commands}{commandList}{ignored}',
+  'app.plugin.info.commands': '\nCommands: {names}',
+  'app.plugin.info.ignored': '\nIgnored execution-type fields: {fields}',
+  'app.plugin.info.error': 'plugin "{id}": error (manifest parse failed). Remove with /plugin remove {id}.',
+  'app.plugin.command.invoked': 'Ran plugin command "{name}", following its instructions…',
+
+  'cmd.help': 'Show available commands',
+  'cmd.model': 'Show or switch model: /model [name]',
+  'cmd.permission': 'Show or set permission mode: /permission [manual|auto|yolo]',
+  'cmd.yolo': 'Switch to yolo mode (allow all)',
+  'cmd.auto': 'Switch to auto mode (writes allowed, bash needs approval)',
+  'cmd.plan': 'Toggle plan mode: read-only investigation and a plan, executed only after your confirmation',
+  'cmd.provider': 'Show or switch provider: /provider [stepfun|anthropic|openai|openai_responses]',
+  'cmd.goal': 'View/guide the autonomous goal: keep the agent pushing toward a goal',
+  'cmd.loop': 'View/create scheduled or loop tasks (cron)',
+  'cmd.fork': 'Fork a copy of the current session (keeping history and tasks); the original is untouched',
+  'cmd.new': 'Start a new session (clear context, create a new session record)',
+  'cmd.compact': 'Compact context: summarize earlier conversation to free up window',
+  'cmd.reflect': 'Review full conversation history and distill reusable methodology (prints to terminal)',
+  'cmd.export-debug-zip': 'Export a debug zip (send to us for troubleshooting; do not share publicly)',
+  'cmd.sessions': 'List past sessions in this working directory',
+  'cmd.resume': 'Switch to a past session: /resume <id> (no id: list sessions)',
+  'cmd.lang': 'Show or switch UI language: /lang [zh|en]',
+  'cmd.mcp': 'Show MCP server connection status and tool counts',
+  'cmd.skill': 'Activate a skill or list available skills: /skill [name] [args]',
+  'cmd.plugin': 'Manage plugins: /plugin [list|install|enable|disable|remove|info]',
+  'cmd.exit': 'Quit Step Code',
+  'cmd.helpText.aliasSuffix': ' (/{aliases})',
+  'cmd.helpText.line': '/{name}{alias} — {describe}',
+
+  'cli.sessions.line': '{id}  {title}  {updated}  {count} msgs',
+  'cli.sessions.showUsage': 'Usage: step sessions show <id>',
+  'cli.sessions.label.title': 'Title: ',
+  'cli.sessions.label.model': 'Model: ',
+  'cli.sessions.label.created': 'Created: ',
+  'cli.sessions.label.updated': 'Updated: ',
+  'cli.sessions.label.count': 'Messages: ',
+  'cli.sessions.deleteUsage': 'Usage: step sessions delete <id>',
+  'cli.sessions.deleted': 'Deleted session {id}',
+  'cli.sessions.deleteFailed': 'Delete failed or session not found: {id}',
+  'cli.sessions.unknownSub': 'Unknown subcommand: {sub} (available: list / show <id> / delete <id>)',
+  'cli.mcp.connectFailed': '[mcp] failed to connect {name}: {message}',
+  'cli.print.aborted': 'aborted',
+  'cli.reflect.noHistory': 'No conversation history to review. Use -c (latest session) or --session <id> to specify a session with history.',
+  'cli.reflect.running': '[reflect] reviewing {count} messages, distilling reusable methodology…',
+
+  'loop.overflow.noCompact': 'Context exceeds the model window and cannot be compacted further. Use /compact or /new to restart the session.',
+  'loop.overflow.nothing': 'Context exceeds the model window with nothing to compact. Use /new to restart the session.',
+  'loop.overflow.retried': 'Context overflow; history compacted, retrying this turn.',
+  'loop.maxTokens.truncated': 'Model output hit the max_tokens limit and was truncated; the truncated tool call was not executed. Reply "continue" to resume output, or raise max_tokens in config.toml.',
+  'loop.maxTokens.truncatedWithLimit': 'Model output hit the max_tokens limit ({limit}) and was truncated; the truncated tool call was not executed. Reply "continue" to resume output, or raise max_tokens in config.toml.',
+  'loop.autoCompacted': 'Context nearing the limit; history auto-compacted.',
+  'loop.maxIterations': 'Reached the maximum number of turns ({max}); aborting this run.',
+  'turn.retry': 'Request failed, retrying in {delay}ms (attempt {attempt}/{max})',
+  'turn.incomplete': 'The model request did not complete.',
+  'turn.subagentRequeue': 'Subagent request was rate limited (429); requeued to the tail, retrying in {delay}ms (attempt {attempt}/{max})',
+  'hook.notice.start': '[hook] {event} running: {command}',
+  'hook.notice.blocked': '[hook] {event} blocked: {reason}',
+  'hook.notice.timeout': '[hook] {event} timed out ({timeout}s), allowed: {command}',
+  'hook.notice.failed': '[hook] {event} failed ({detail}), allowed: {command}',
+  'hook.blocked.noReason': '(hook gave no reason)',
+
+  'error.advice.auth': 'Hint: the API key is invalid or lacks permission. Check the STEP_CODE_API_KEY environment variable or the key in config.toml.',
+  'error.advice.rateLimit': 'Hint: rate limiting persists. Retry later, or check your account quota.',
+
+  'factory.unknownProvider': "Unknown provider provider='{provider}'. Supported: {list}.",
+};
+
+/** 两张字典表（导出供测试遍历断言 key 一致性；生产代码请走 t()）。 */
+export const I18N_TABLES: Record<Locale, Record<string, string>> = { zh, en };
+
+let locale: Locale = 'zh';
+
+/** 设置当前界面语言。 */
+export function setLocale(l: Locale): void {
+  locale = l;
+}
+
+/** 读取当前界面语言。 */
+export function getLocale(): Locale {
+  return locale;
+}
+
+/**
+ * 查文案：当前 locale 表 → zh 表回退 → key 本身兜底。
+ * `{name}` 占位用 vars 替换；未提供的占位保留原样（开发期易发现）。
+ */
+export function t(key: string, vars?: Record<string, string | number>): string {
+  const template = I18N_TABLES[locale][key] ?? I18N_TABLES.zh[key] ?? key;
+  if (vars === undefined) return template;
+  return template.replace(/\{(\w+)\}/g, (raw, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : raw,
+  );
+}
