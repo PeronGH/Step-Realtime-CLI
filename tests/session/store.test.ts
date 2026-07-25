@@ -1,0 +1,345 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type Anthropic from '@anthropic-ai/sdk';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { stored } from '../../src/agent/message.js';
+import { SessionStore, workdirKey, deriveTitle, derivePreview } from '../../src/session/store.js';
+import { isStepref } from '../../src/session/attachments.js';
+
+let base: string;
+let store: SessionStore;
+const cwd = 'C:/some/project';
+
+beforeEach(() => {
+  base = mkdtempSync(join(tmpdir(), 'stepcode-sess-'));
+  store = new SessionStore(base);
+});
+
+afterEach(() => {
+  rmSync(base, { recursive: true, force: true });
+});
+
+describe('workdirKey', () => {
+  it('稳定且对大小写/斜杠归一', () => {
+    expect(workdirKey('C:/A/B')).toBe(workdirKey('c:\\a\\b'));
+    expect(workdirKey('C:/A/B')).not.toBe(workdirKey('C:/A/C'));
+  });
+});
+
+describe('SessionStore', () => {
+  it('create → save → load 往返', () => {
+    const s = store.create(cwd, 'step-3.7-flash');
+    s.messages.push(stored({ role: 'user', content: 'hi' }, 'user'));
+    store.save(s);
+
+    const loaded = store.load(cwd, s.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.id).toBe(s.id);
+    expect(loaded!.messageCount).toBe(1);
+    expect(loaded!.messages[0]!.message).toEqual({ role: 'user', content: 'hi' });
+    expect(loaded!.messages[0]!.origin).toBe('user');
+    expect(loaded!.messages[0]!.id).toBeTruthy();
+    expect(loaded!.messages[0]!.ts).toBeTruthy();
+  });
+
+  it('fork 谱系：forkedFrom 随会话持久化', () => {
+    const src = store.create(cwd, 'step-3.7-flash');
+    src.messages.push(stored({ role: 'user', content: 'hi' }, 'user'));
+    store.save(src);
+
+    const forked = store.create(cwd, 'step-3.7-flash');
+    forked.forkedFrom = src.id;
+    forked.messages = [...src.messages];
+    store.save(forked);
+
+    const loaded = store.load(cwd, forked.id);
+    expect(loaded!.forkedFrom).toBe(src.id);
+    expect(loaded!.messages).toHaveLength(1);
+    // 源会话无 forkedFrom
+    expect(store.load(cwd, src.id)!.forkedFrom).toBeUndefined();
+  });
+
+  it('load 不存在返回 null', () => {
+    expect(store.load(cwd, 'nope')).toBeNull();
+  });
+
+  it('含 thinking 块（带 signature）的 assistant 消息 save/load 往返一致', () => {
+    const s = store.create(cwd, 'step-3.7-flash');
+    s.messages.push(stored({ role: 'user', content: 'hi' }, 'user'));
+    s.messages.push(
+      stored(
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: '先想想…', signature: 'sig-abc' },
+            { type: 'text', text: '答案' },
+          ],
+        } as unknown as Anthropic.MessageParam,
+        'assistant',
+      ),
+    );
+    store.save(s);
+
+    const loaded = store.load(cwd, s.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.messages[1]!.origin).toBe('assistant');
+    expect(loaded!.messages[1]!.message).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: '先想想…', signature: 'sig-abc' },
+        { type: 'text', text: '答案' },
+      ],
+    });
+  });
+
+  it('list 按 updatedAt 倒序且只含本工作目录', async () => {
+    const a = store.create(cwd, 'm');
+    store.save(a);
+    await new Promise((r) => setTimeout(r, 5));
+    const b = store.create(cwd, 'm');
+    store.save(b);
+    // 另一个工作目录的会话不应出现
+    const other = store.create('D:/other', 'm');
+    store.save(other);
+
+    const metas = store.list(cwd);
+    expect(metas.map((m) => m.id)).toEqual([b.id, a.id]);
+  });
+
+  it('goal 状态快照随会话 save/load 往返', () => {
+    const s = store.create(cwd, 'm');
+    s.goal = {
+      objective: '写报告',
+      status: 'active',
+      turnsUsed: 3,
+      turnBudget: 10,
+      tokensUsed: 12345,
+      tokenBudget: 50000,
+      createdAt: Date.now(),
+    };
+    store.save(s);
+    const loaded = store.load(cwd, s.id);
+    expect(loaded!.goal).toMatchObject({
+      objective: '写报告',
+      status: 'active',
+      turnsUsed: 3,
+      turnBudget: 10,
+      tokensUsed: 12345,
+      tokenBudget: 50000,
+    });
+    // 无 goal 的会话读出为 undefined
+    const plain = store.create(cwd, 'm');
+    store.save(plain);
+    expect(store.load(cwd, plain.id)!.goal).toBeUndefined();
+  });
+
+  it('latest 返回最近更新的会话', async () => {
+    const a = store.create(cwd, 'm');
+    store.save(a);
+    await new Promise((r) => setTimeout(r, 5));
+    const b = store.create(cwd, 'm');
+    b.messages.push(stored({ role: 'user', content: 'x' }, 'user'));
+    store.save(b);
+
+    const latest = store.latest(cwd);
+    expect(latest!.id).toBe(b.id);
+    expect(latest!.messages).toHaveLength(1);
+  });
+
+  it('空目录 list 为空、latest 为 null', () => {
+    expect(store.list('E:/empty')).toEqual([]);
+    expect(store.latest('E:/empty')).toBeNull();
+  });
+
+  it('save 自动写入 title（从首条 user 消息派生）', () => {
+    const s = store.create(cwd, 'm');
+    s.messages.push(stored({ role: 'user', content: '第一条问题' }, 'user'));
+    store.save(s);
+    expect(s.title).toBe('第一条问题');
+    expect(store.load(cwd, s.id)!.title).toBe('第一条问题');
+  });
+
+  it('list 返回 title', () => {
+    const s = store.create(cwd, 'm');
+    s.messages.push(stored({ role: 'user', content: '标题内容' }, 'user'));
+    store.save(s);
+    expect(store.list(cwd)[0]!.title).toBe('标题内容');
+  });
+
+  it('delete 删除后 load 返回 null，再次删除返回 false', () => {
+    const s = store.create(cwd, 'm');
+    store.save(s);
+    expect(store.load(cwd, s.id)).not.toBeNull();
+    expect(store.delete(cwd, s.id)).toBe(true);
+    expect(store.load(cwd, s.id)).toBeNull();
+    expect(store.delete(cwd, s.id)).toBe(false);
+  });
+});
+
+describe('SessionStore 全量历史日志（appendFull / loadFull）', () => {
+  it('append-only + 按 id 去重，重复调用幂等', () => {
+    const s = store.create(cwd, 'm');
+    const m1 = stored({ role: 'user', content: 'a' }, 'user');
+    const m2 = stored({ role: 'assistant', content: 'b' }, 'assistant');
+    expect(store.appendFull(cwd, s.id, [m1])).toBe(1);
+    // 再次追加 m1（已存在）+ m2（新） → 只写入 m2
+    expect(store.appendFull(cwd, s.id, [m1, m2])).toBe(2 - 1);
+    const loaded = store.loadFull(cwd, s.id);
+    expect(loaded.map((m) => m.id)).toEqual([m1.id, m2.id]);
+  });
+
+  it('压缩不影响已落盘全量日志：history 变短后仍可读回被压缩掉的行', () => {
+    const s = store.create(cwd, 'm');
+    const msgs = ['1', '2', '3', '4'].map((t) => stored({ role: 'user', content: t }, 'user'));
+    store.appendFull(cwd, s.id, msgs);
+    // 模拟压缩后 history 只剩最后一条，再持久化一次
+    store.appendFull(cwd, s.id, [msgs[3]!]);
+    const loaded = store.loadFull(cwd, s.id);
+    expect(loaded).toHaveLength(4); // 前 3 条不因压缩丢失
+  });
+
+  it('全量日志不存在返回空数组', () => {
+    expect(store.loadFull(cwd, 'nope')).toEqual([]);
+  });
+
+  it('空 messages 追加返回 0，不建文件', () => {
+    const s = store.create(cwd, 'm');
+    expect(store.appendFull(cwd, s.id, [])).toBe(0);
+    expect(store.loadFull(cwd, s.id)).toEqual([]);
+  });
+});
+
+describe('SessionStore 图片引用式存储（offload / 不污染内存）', () => {
+  /** 生成长度 ≥ 阈值的规范 base64。 */
+  function bigBase64(bytes = 4000): string {
+    return Buffer.alloc(bytes, 7).toString('base64');
+  }
+
+  function imageStored(b64: string) {
+    return stored(
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '图' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
+        ],
+      },
+      'user',
+    );
+  }
+
+  function imgData(sm: { message: Anthropic.MessageParam }): string {
+    const content = sm.message.content as Anthropic.ContentBlockParam[];
+    const img = content.find((b): b is Anthropic.ImageBlockParam => b.type === 'image')!;
+    return (img.source as Anthropic.Base64ImageSource).data;
+  }
+
+  it('save：落盘文件里图片是 stepref，不再内联 base64；内存 history 仍是原始 base64', () => {
+    const b64 = bigBase64();
+    const s = store.create(cwd, 'm');
+    s.messages.push(imageStored(b64));
+    store.save(s);
+
+    const raw = readFileSync(join(base, workdirKey(cwd), `${s.id}.json`), 'utf8');
+    expect(raw).toContain('stepref:');
+    expect(raw).not.toContain(b64); // 原始 base64 不落盘
+
+    // 内存态未被污染
+    expect(imgData(s.messages[0]!)).toBe(b64);
+
+    // 读回快照后是 stepref（供 toWire rehydrate）
+    const loaded = store.load(cwd, s.id)!;
+    expect(isStepref(imgData(loaded.messages[0]!))).toBe(true);
+  });
+
+  it('appendFull：全量日志里图片是 stepref，不内联 base64；入参 messages 未被改动', () => {
+    const b64 = bigBase64();
+    const s = store.create(cwd, 'm');
+    const m = imageStored(b64);
+    store.appendFull(cwd, s.id, [m]);
+
+    const raw = readFileSync(join(base, workdirKey(cwd), `${s.id}.full.jsonl`), 'utf8');
+    expect(raw).toContain('stepref:');
+    expect(raw).not.toContain(b64);
+
+    // 入参未被污染
+    expect(imgData(m)).toBe(b64);
+    // 读回后是 stepref
+    expect(isStepref(imgData(store.loadFull(cwd, s.id)[0]!))).toBe(true);
+  });
+
+  it('小图（< 阈值）不 offload，落盘仍内联 base64', () => {
+    const small = Buffer.alloc(100, 1).toString('base64');
+    const s = store.create(cwd, 'm');
+    s.messages.push(imageStored(small));
+    store.save(s);
+    const raw = readFileSync(join(base, workdirKey(cwd), `${s.id}.json`), 'utf8');
+    expect(raw).toContain(small);
+    expect(raw).not.toContain('stepref:');
+  });
+});
+
+describe('deriveTitle', () => {
+  it('从首条 user 消息（string content）派生，折叠空白', () => {
+    const msgs = [stored({ role: 'user', content: '  hello   world\nfoo  ' }, 'user')];
+    expect(deriveTitle(msgs)).toBe('hello world foo');
+  });
+
+  it('从数组 content 拼接所有 text 块', () => {
+    const msgs = [
+      stored(
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'part one' },
+            { type: 'text', text: 'part two' },
+          ],
+        },
+        'user',
+      ),
+    ];
+    expect(deriveTitle(msgs)).toBe('part one part two');
+  });
+
+  it('超过 50 字符截断加省略号', () => {
+    const long = 'a'.repeat(60);
+    expect(deriveTitle([stored({ role: 'user', content: long }, 'user')])).toBe(`${'a'.repeat(50)}…`);
+  });
+
+  it('取第一条 user 消息（跳过 assistant）', () => {
+    const msgs = [
+      stored({ role: 'assistant', content: '你好' }, 'assistant'),
+      stored({ role: 'user', content: '真正的问题' }, 'user'),
+    ];
+    expect(deriveTitle(msgs)).toBe('真正的问题');
+  });
+
+  it('无 user 消息或纯空返回 undefined', () => {
+    expect(deriveTitle([stored({ role: 'assistant', content: 'hi' }, 'assistant')])).toBeUndefined();
+    expect(deriveTitle([])).toBeUndefined();
+    expect(deriveTitle([stored({ role: 'user', content: '   \n  ' }, 'user')])).toBeUndefined();
+  });
+});
+
+describe('derivePreview', () => {
+  it('从首条 user 消息派生，折叠空白', () => {
+    const msgs = [stored({ role: 'user', content: '  hello   world\nfoo  ' }, 'user')];
+    expect(derivePreview(msgs)).toBe('hello world foo');
+  });
+
+  it('超过 200 字符截断加省略号（比标题留更多内容供搜索）', () => {
+    const long = 'a'.repeat(250);
+    expect(derivePreview([stored({ role: 'user', content: long }, 'user')])).toBe(`${'a'.repeat(200)}…`);
+  });
+
+  it('200 字符以内不截断', () => {
+    const exact = 'b'.repeat(200);
+    expect(derivePreview([stored({ role: 'user', content: exact }, 'user')])).toBe(exact);
+  });
+
+  it('无 user 消息或纯空返回 undefined', () => {
+    expect(derivePreview([stored({ role: 'assistant', content: 'hi' }, 'assistant')])).toBeUndefined();
+    expect(derivePreview([])).toBeUndefined();
+  });
+});
