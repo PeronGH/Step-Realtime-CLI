@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-bundle/
+dist-sea/
+*.log
+
+# 环境变量（保留示例文件）
+.env
+.env.*
+!.env.example
+
+# 运行时与本地数据
+.step-code/
+mcp-test-server/
+
+# AI 代理本地配置（含内部路径/私有画像，不入库）
+.ai-tool-config/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
