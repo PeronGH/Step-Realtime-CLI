@@ -1,0 +1,87 @@
+import { z } from 'zod';
+import { fail, ok, type ToolDef } from './types.js';
+
+const schema = z.object({
+  query: z.string().describe('检索关键词。'),
+  n: z
+    .number()
+    .int()
+    .min(1)
+    .max(20)
+    .optional()
+    .describe('返回结果条数，默认 10，范围 1-20。'),
+  category: z
+    .enum(['programming', 'research', 'gov', 'business'])
+    .optional()
+    .describe('检索场景：programming 代码编程 / research 学术研究 / gov 政务 / business 商业财经；省略则全网。'),
+});
+
+interface SearchResult {
+  url: string;
+  position: number;
+  title: string;
+  time?: string;
+  snippet?: string;
+  content?: string;
+}
+
+const MAX_SNIPPET = 500;
+
+/**
+ * 联网搜索工具，接阶跃星辰官方网页搜索接口（POST <baseUrl>/step_plan/v1/search，走 Step Plan 通道）。
+ * 默认自带，用同一个 STEPFUN API key，作为内置联网搜索能力。
+ * 计费：按阶跃平台网络搜索计价，消耗 Step Plan Credit。
+ */
+export const webSearchTool: ToolDef<z.infer<typeof schema>> = {
+  name: 'web_search',
+  description:
+    '联网搜索互联网公开信息（阶跃官方网页搜索）。用于获取最新的 API 文档、库版本、CVE、实时资讯等模型训练后才有的信息。返回标题、链接与摘要。',
+  schema,
+  access: () => ({ kind: 'none' }), // 纯网络调用，无本地副作用
+  async execute(input, ctx) {
+    if (ctx.apiKey === undefined || ctx.apiKey === '') {
+      return fail('未配置 StepFun API key，无法联网搜索。');
+    }
+    const base = (ctx.baseUrl ?? 'https://api.stepfun.com').replace(/\/+$/, '');
+    const url = `${base}/step_plan/v1/search`;
+    const body: Record<string, unknown> = { query: input.query, n: input.n ?? 10 };
+    if (input.category !== undefined) body['category'] = input.category;
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ctx.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: ctx.signal,
+      });
+    } catch (e) {
+      if (ctx.signal?.aborted) return fail('用户中断，搜索已取消。');
+      return fail(`搜索请求失败：${(e as Error).message}`);
+    }
+    if (!res.ok) {
+      return fail(`搜索失败：HTTP ${res.status}。请检查 API key 与额度。`);
+    }
+
+    let data: { results?: SearchResult[] };
+    try {
+      data = (await res.json()) as { results?: SearchResult[] };
+    } catch {
+      return fail('搜索返回无法解析。');
+    }
+    const results = data.results ?? [];
+    if (results.length === 0) {
+      return ok('[无搜索结果，可调整关键词后重试]');
+    }
+    const formatted = results
+      .map((r) => {
+        const snippet = (r.snippet ?? '').slice(0, MAX_SNIPPET);
+        return `[${r.position}] ${r.title}\n    ${r.url}\n    ${snippet}`;
+      })
+      .join('\n\n');
+    return ok(formatted);
+  },
+};
