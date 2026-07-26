@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -70,6 +70,15 @@ function discoverInDir(root: string, source: SkillDefinition['source']): SkillDe
 
 export interface SkillRegistry {
   skills: Map<string, SkillDefinition>;
+  /** 同名冲突清单：后扫描来源覆盖先扫描来源时记录（无冲突为空数组）。buildSkillRegistry 恒赋值。 */
+  conflicts?: SkillConflict[];
+}
+
+/** 一条同名冲突：最终生效的定义 + 被覆盖的定义（按扫描顺序，先扫的在前）。 */
+export interface SkillConflict {
+  name: string;
+  winner: SkillDefinition;
+  overridden: SkillDefinition[];
 }
 
 /** 解析配置里的路径条目：`~` 展开为 homedir，相对路径按 cwd 解析为绝对路径。 */
@@ -81,32 +90,110 @@ function resolveConfigPath(p: string, cwd: string): string {
 }
 
 /**
- * 构建 skill 注册表：项目级 < 用户级 < 追加目录 < plugin，同名后者覆盖。
- * extraDirs（config.toml extra_skill_dirs）追加在默认三路径之后扫描，
- * 个人追加目录可 shadow 同名项目/用户级 skill；plugin skills 始终最后、优先级最高。
+ * 构建 skill 注册表：用户级 < 项目 .agents/skills < 项目 .step-code/skills < 追加目录 < plugin，同名后者覆盖。
+ * 原则：具体胜一般（项目级盖用户级）、原生胜兼容（.step-code 盖 .agents，后者是其他 CLI 的兼容目录）。
+ * extraDirs（config.toml extra_skill_dirs）追加在默认路径之后扫描，可 shadow 同名用户/项目级 skill；
+ * plugin skills 始终最后、优先级最高。disabledSkills（config.toml disabled_skills）按名排除，
+ * 合并完成后统一过滤，任何来源的同名 skill 都不进注册表（目录不归你管时的屏蔽出口）。
  * @param cwd 工作目录（项目级 .step-code/skills 与 .agents/skills）
  * @param pluginSkillDirs plugin 提供的 skill 目录（绝对路径数组）
  * @param extraDirs 追加的 skill 目录（支持 `~` 与相对 cwd 的路径）
+ * @param disabledSkills 按名排除的 skill 清单
  */
 export function buildSkillRegistry(
   cwd: string,
   pluginSkillDirs: string[] = [],
   extraDirs?: string[],
+  disabledSkills?: readonly string[],
 ): SkillRegistry {
   const skills = new Map<string, SkillDefinition>();
+  const overriddenMap = new Map<string, SkillDefinition[]>();
   const addAll = (defs: SkillDefinition[]): void => {
-    for (const d of defs) skills.set(d.name, d);
+    for (const d of defs) {
+      const prev = skills.get(d.name);
+      if (prev !== undefined) overriddenMap.set(d.name, [...(overriddenMap.get(d.name) ?? []), prev]);
+      skills.set(d.name, d);
+    }
   };
-  addAll(discoverInDir(join(cwd, '.step-code', 'skills'), 'project'));
-  addAll(discoverInDir(join(cwd, '.agents', 'skills'), 'project'));
   addAll(discoverInDir(join(homedir(), '.step-code', 'skills'), 'user'));
+  addAll(discoverInDir(join(cwd, '.agents', 'skills'), 'project'));
+  addAll(discoverInDir(join(cwd, '.step-code', 'skills'), 'project'));
   for (const p of extraDirs ?? []) {
     addAll(discoverInDir(resolveConfigPath(p, cwd), 'user'));
   }
   for (const dir of pluginSkillDirs) {
     addAll(discoverInDir(dir, 'plugin'));
   }
-  return { skills };
+  for (const name of disabledSkills ?? []) {
+    skills.delete(name);
+    overriddenMap.delete(name); // 被排除的 skill 整体不加载，冲突也随之消失
+  }
+  const conflicts: SkillConflict[] = [];
+  for (const [name, overridden] of overriddenMap) {
+    const winner = skills.get(name);
+    if (winner !== undefined) conflicts.push({ name, winner, overridden });
+  }
+  return { skills, conflicts };
+}
+
+/**
+ * skill 扫描根目录的指纹：每个已发现 SKILL.md 的「路径:mtime」排序拼接。
+ * 与 buildSkillRegistry 的扫描根保持一致（含优先级无关，纯变更检测）：
+ * 新增/删除/改名 skill 改变列表，编辑 SKILL.md 改变 mtime。用作 reload 的失效信号——
+ * 对齐 Codex「缓存 + 失效 + 用到时全量重扫」配方，指纹比对替代 watcher（无新依赖、TUI 无 watcher 生命周期负担）。
+ */
+export function fingerprintSkillRoots(cwd: string, pluginSkillDirs: string[] = [], extraDirs?: string[]): string {
+  const roots = [
+    join(homedir(), '.step-code', 'skills'),
+    join(cwd, '.agents', 'skills'),
+    join(cwd, '.step-code', 'skills'),
+    ...(extraDirs ?? []).map((p) => resolveConfigPath(p, cwd)),
+    ...pluginSkillDirs,
+  ];
+  const parts: string[] = [];
+  for (const root of roots) {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue; // 根目录不存在：等同空
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skillMd = join(root, entry.name, 'SKILL.md');
+      try {
+        parts.push(`${skillMd}:${statSync(skillMd).mtimeMs}`);
+      } catch {
+        // 无 SKILL.md 的子目录与发现逻辑一致地忽略
+      }
+    }
+  }
+  return parts.sort().join('\n');
+}
+
+/** 两次注册表的差异（reload 报告用）。changed 判定：描述、正文或目录路径任一变化。 */
+export interface SkillRegistryDiff {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+export function diffSkillRegistries(prev: SkillRegistry, next: SkillRegistry): SkillRegistryDiff {
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
+  for (const [name, def] of next.skills) {
+    const old = prev.skills.get(name);
+    if (old === undefined) {
+      added.push(name);
+    } else if (old.description !== def.description || old.content !== def.content || old.dir !== def.dir) {
+      changed.push(name);
+    }
+  }
+  for (const name of prev.skills.keys()) {
+    if (!next.skills.has(name)) removed.push(name);
+  }
+  return { added, removed, changed };
 }
 
 /** skill 清单总量预算（字符）。8000 字符软上限，防技能膨胀撑爆 system prompt。 */

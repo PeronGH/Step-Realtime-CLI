@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildSkillRegistry,
+  diffSkillRegistries,
   escapeSkillXml,
   expandSkillContent,
+  fingerprintSkillRoots,
   parseSkillMd,
   renderSkillActivation,
   skillListing,
@@ -100,6 +102,38 @@ describe('buildSkillRegistry + skillListing', () => {
     const reg = buildSkillRegistry(dir, [join(dir, 'plugin-skills')], [join(dir, 'extra-skills')]);
     expect(reg.skills.get('plug-skill')!.description).toBe('插件版');
     expect(reg.skills.get('plug-skill')!.source).toBe('plugin');
+  });
+
+  it('同名 skill 项目 .step-code/skills 盖 .agents/skills（原生胜兼容）', () => {
+    const agentsDir = join(dir, '.agents', 'skills', 'my-skill');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'SKILL.md'), SKILL_MD.replace('做某件事', '兼容目录版'));
+    const nativeDir = join(dir, '.step-code', 'skills', 'my-skill');
+    mkdirSync(nativeDir, { recursive: true });
+    writeFileSync(join(nativeDir, 'SKILL.md'), SKILL_MD.replace('做某件事', '原生目录版'));
+
+    const reg = buildSkillRegistry(dir);
+    expect(reg.skills.get('my-skill')!.description).toBe('原生目录版');
+  });
+
+  it('disabledSkills 按名排除：项目级与 plugin 来源都被过滤', () => {
+    const projSkill = join(dir, '.step-code', 'skills', 'my-skill');
+    mkdirSync(projSkill, { recursive: true });
+    writeFileSync(join(projSkill, 'SKILL.md'), SKILL_MD);
+    const pluginDir = join(dir, 'plugin-skills', 'plug-skill');
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, 'SKILL.md'),
+      SKILL_MD.replace('name: my-skill', 'name: plug-skill'),
+    );
+
+    const reg = buildSkillRegistry(dir, [join(dir, 'plugin-skills')], undefined, ['my-skill', 'plug-skill']);
+    expect(reg.skills.has('my-skill')).toBe(false);
+    expect(reg.skills.has('plug-skill')).toBe(false);
+    // 排除名单为空/未传时不影响正常发现
+    const reg2 = buildSkillRegistry(dir, [join(dir, 'plugin-skills')]);
+    expect(reg2.skills.has('my-skill')).toBe(true);
+    expect(reg2.skills.has('plug-skill')).toBe(true);
   });
 
   it('extraDirs 支持相对 cwd 路径；缺省走默认收集', () => {
@@ -217,6 +251,101 @@ describe('skill 工具 args 与递归防护', () => {
       const r = await skillTool.execute({ skill: 'k' }, { cwd: process.cwd(), skills: reg });
       expect(r.isError).toBe(false);
     }
+  });
+});
+
+describe('fingerprintSkillRoots + diffSkillRegistries（reload 支撑）', () => {
+  const writeSkill = (root: string, name: string, md: string): string => {
+    const skillDir = join(root, name);
+    mkdirSync(skillDir, { recursive: true });
+    const file = join(skillDir, 'SKILL.md');
+    writeFileSync(file, md);
+    return file;
+  };
+
+  it('新增/删除 skill 后指纹变化，无操作指纹不变', () => {
+    const root = join(dir, '.step-code', 'skills');
+    const before = fingerprintSkillRoots(dir);
+    writeSkill(root, 'my-skill', SKILL_MD);
+    const afterAdd = fingerprintSkillRoots(dir);
+    expect(afterAdd).not.toBe(before);
+    expect(fingerprintSkillRoots(dir)).toBe(afterAdd); // 无操作：稳定
+    rmSync(join(root, 'my-skill'), { recursive: true, force: true });
+    expect(fingerprintSkillRoots(dir)).toBe(before); // 删干净后回到原指纹
+  });
+
+  it('编辑 SKILL.md（mtime 变化）后指纹变化', () => {
+    const root = join(dir, '.step-code', 'skills');
+    const file = writeSkill(root, 'my-skill', SKILL_MD);
+    const before = fingerprintSkillRoots(dir);
+    // 显式拨动 mtime，避免文件系统时间精度导致误判不变
+    const future = new Date(Date.now() + 5000);
+    utimesSync(file, future, future);
+    expect(fingerprintSkillRoots(dir)).not.toBe(before);
+  });
+
+  it('diff：新增/移除/变更分类正确', () => {
+    const root = join(dir, '.step-code', 'skills');
+    writeSkill(root, 'a', SKILL_MD.replace('name: my-skill', 'name: a'));
+    writeSkill(root, 'b', SKILL_MD.replace('name: my-skill', 'name: b'));
+    const prev = buildSkillRegistry(dir);
+
+    // b 改描述（changed），删 a（removed），加 c（added）
+    writeSkill(root, 'b', SKILL_MD.replace('name: my-skill', 'name: b').replace('做某件事', '改过'));
+    rmSync(join(root, 'a'), { recursive: true, force: true });
+    writeSkill(root, 'c', SKILL_MD.replace('name: my-skill', 'name: c'));
+    const next = buildSkillRegistry(dir);
+
+    const diff = diffSkillRegistries(prev, next);
+    expect(diff.added).toEqual(['c']);
+    expect(diff.removed).toEqual(['a']);
+    expect(diff.changed).toEqual(['b']);
+  });
+
+  it('diff：内容未动时三数组皆空', () => {
+    const root = join(dir, '.step-code', 'skills');
+    writeSkill(root, 'a', SKILL_MD.replace('name: my-skill', 'name: a'));
+    const reg = buildSkillRegistry(dir);
+    const diff = diffSkillRegistries(reg, buildSkillRegistry(dir));
+    expect(diff.added).toEqual([]);
+    expect(diff.removed).toEqual([]);
+    expect(diff.changed).toEqual([]);
+  });
+});
+
+describe('同名冲突收集（conflicts）', () => {
+  const writeSkill = (root: string, name: string, md: string): void => {
+    mkdirSync(join(root, name), { recursive: true });
+    writeFileSync(join(root, name, 'SKILL.md'), md);
+  };
+
+  it('同名 skill 被高优先级来源覆盖时记录冲突：winner 与 overridden 正确', () => {
+    writeSkill(join(dir, '.agents', 'skills'), 'my-skill', SKILL_MD.replace('做某件事', '兼容目录版'));
+    writeSkill(join(dir, '.step-code', 'skills'), 'my-skill', SKILL_MD.replace('做某件事', '原生目录版'));
+
+    const reg = buildSkillRegistry(dir);
+    expect(reg.conflicts).toHaveLength(1);
+    const c = reg.conflicts![0]!;
+    expect(c.name).toBe('my-skill');
+    expect(c.winner.description).toBe('原生目录版');
+    expect(c.winner.dir).toContain('.step-code');
+    expect(c.overridden).toHaveLength(1);
+    expect(c.overridden[0]!.description).toBe('兼容目录版');
+    expect(c.overridden[0]!.dir).toContain('.agents');
+  });
+
+  it('无同名时 conflicts 为空数组', () => {
+    writeSkill(join(dir, '.step-code', 'skills'), 'my-skill', SKILL_MD);
+    const reg = buildSkillRegistry(dir);
+    expect(reg.conflicts).toEqual([]);
+  });
+
+  it('冲突中的 skill 被 disabledSkills 排除后，冲突随之消失', () => {
+    writeSkill(join(dir, '.agents', 'skills'), 'my-skill', SKILL_MD);
+    writeSkill(join(dir, '.step-code', 'skills'), 'my-skill', SKILL_MD);
+    const reg = buildSkillRegistry(dir, [], undefined, ['my-skill']);
+    expect(reg.skills.has('my-skill')).toBe(false);
+    expect(reg.conflicts).toEqual([]);
   });
 });
 
