@@ -183,6 +183,7 @@ timeout = 30                                 # 秒，可选，默认 30，硬顶
 | `STEP_CODE_PROVIDER` | 服务商 |
 | `STEP_CODE_BASE_URL` | API 地址 |
 | `STEP_CODE_MODEL` | 模型名 |
+| `STEP_DEBUG_RENDER` | 设为 `1` 开启动态帧渲染预算诊断：触发降级（`DEGRADED`）或帧高触线（`DANGER`）时追加写 `%TEMP%/step-code-render-debug.log`，用于排查渲染/滚动问题 |
 
 ## 数据目录
 
