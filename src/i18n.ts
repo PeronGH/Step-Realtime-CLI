@@ -157,7 +157,7 @@ const zh = {
   'app.image.removedMore': '已移除一张图片（剩 {count} 张）。',
   'app.image.removedNone': '已移除图片，当前无附加图片。',
   'app.image.banner': '🖼 已附加 {count} 张图片',
-  'app.image.bannerHint': '  （输入为空时按退格删除最后一张 · Alt+V 继续添加）',
+  'app.image.bannerHint': '  （占位符已插入输入框，可直接编辑删除 · Alt+V 继续添加）',
   'app.user.withImages': '（含 {count} 张图片）',
 
   // --- App 发送队列与中断 ---
@@ -492,7 +492,7 @@ const en: Record<keyof typeof zh, string> = {
   'app.image.removedMore': 'Removed one image ({count} left).',
   'app.image.removedNone': 'Image removed; no images attached now.',
   'app.image.banner': '🖼 {count} images attached',
-  'app.image.bannerHint': '  (Backspace with empty input removes the last · Alt+V to add more)',
+  'app.image.bannerHint': '  (placeholders inserted in input, edit to remove · Alt+V to add more)',
   'app.user.withImages': ' (with {count} images)',
 
   'app.queue.added': 'Added to send queue (#{index}): {text}',

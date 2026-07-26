@@ -28,6 +28,7 @@ import { ApprovalPrompt, denyReason, estimateChromeRows as estimateApprovalRows,
 import { QuestionPrompt, estimateChromeRows as estimateQuestionRows } from './QuestionPrompt.js';
 import type { AskUserRequest, QuestionAnswers } from '../tools/askUser.js';
 import { readClipboardImage } from './clipboardImage.js';
+import { ImageAttachmentStore, extractImageContent } from './imageAttachment.js';
 import { busyRoute, helpText, parseSlash } from './commands.js';
 import { runPluginCommand } from './pluginCommand.js';
 import { expandPluginCommand, type PluginCommand } from '../plugin/manager.js';
@@ -53,7 +54,6 @@ import { computeBacktrack, truncateItemsAtLastUser } from './backtrack.js';
 import { StatusBar } from './StatusBar.js';
 import { TodoPanel } from './TodoPanel.js';
 import { applyStepEvent, applySubagentEvent, parseWorkflowInput, parseWfSid } from './WorkflowPanel.js';
-import { buildUserContent, type PendingImage } from './userContent.js';
 import { WelcomeBox } from './WelcomeBox.js';
 import type { SessionData, SessionStore } from '../session/store.js';
 import { exportDebugBundle } from '../session/debugBundle.js';
@@ -171,7 +171,8 @@ export function App({
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<AskUserRequest | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [imageCount, setImageCount] = useState(0);
+  // 输入框里当前有效图片占位符数（从 input 派生，占位符增删自动跟随）。
+  const imageCount = useMemo(() => imageStore.current.activeIds(input).length, [input]);
   const [, setTodoTick] = useState(0);
   // <Static> 重挂载计数：/new、/resume 整体重置 items 时递增，key 驱动 Static 重建
   // （Static 内部只按数组长度追加渲染，数组变短不重挂会丢条目；重挂后 ink 丢弃旧静态输出重放新实例）。
@@ -202,7 +203,7 @@ export function App({
   const sessionApprovals = useRef<Set<string>>(new Set());
   const pendingRef = useRef<ApprovalRequest | null>(null);
   const approvalResolver = useRef<((r: { allow: boolean; feedback?: string }) => void) | null>(null);
-  const pendingImages = useRef<PendingImage[]>([]);
+  const imageStore = useRef<ImageAttachmentStore>(new ImageAttachmentStore());
   const pendingPlanRef = useRef<PendingPlan | null>(null);
   const planResolver = useRef<((approved: boolean) => void) | null>(null);
   // 询问用户：双 ref 模式（照抄审批/计划）。发起时存 resolve + setPending 触发渲染，答完/取消 resolve 恢复 generator。
@@ -462,20 +463,10 @@ export function App({
         pushItem({ kind: 'note', text: t('app.image.none') });
         return;
       }
-      pendingImages.current.push(img);
-      setImageCount(pendingImages.current.length);
-      pushItem({ kind: 'note', text: t('app.image.attached', { count: pendingImages.current.length }) });
-    });
-  }, [pushItem]);
-
-  const removeLastImage = useCallback(() => {
-    if (pendingImages.current.length === 0) return;
-    pendingImages.current.pop();
-    const n = pendingImages.current.length;
-    setImageCount(n);
-    pushItem({
-      kind: 'note',
-      text: n > 0 ? t('app.image.removedMore', { count: n }) : t('app.image.removedNone'),
+      const att = imageStore.current.add(img.base64, img.mediaType, img.width, img.height);
+      // 把占位符追加到输入框末尾（前面有内容则补一个空格分隔）。
+      // 用户可直接编辑删除该占位符文本来移除这张图。imageCount 从 input 派生，自动跟随。
+      setInput((prev) => (prev === '' || prev.endsWith(' ') ? prev : `${prev} `) + att.placeholder);
     });
   }, [pushItem]);
 
@@ -599,11 +590,7 @@ export function App({
       enterExitPrimed();
       return;
     }
-    // 输入框为空时按退格/删除键，移除最后一张待发图片（可删除交互）
-    if ((meta.backspace || meta.delete) && input === '' && pendingImages.current.length > 0) {
-      removeLastImage();
-      return;
-    }
+    // 图片以占位符文本形式在输入框内，用户可直接用退格/删除键编辑移除，无需特殊分支。
     if (meta.meta && key === 'v' && !busyRef.current) {
       attachClipboardImage();
       return;
@@ -1103,6 +1090,7 @@ export function App({
           history.current = [];
           subagentCounter.current.spawned = 0;
           todos.current = [];
+          imageStore.current.clear();
           sessionRef.current = store.create(ctx.cwd, model);
           sessionApprovals.current.clear();
           // 新会话不继承上一会话的 goal（goal 随会话持久化，新会话从头开始）
@@ -1251,6 +1239,7 @@ export function App({
           // 独立拷贝，别和 store 里的数组共享
           history.current = data.messages.map((m) => ({ ...m }));
           todos.current = data.todos !== undefined ? [...data.todos] : [];
+          imageStore.current.clear();
           sessionRef.current = data;
           // 恢复该会话的 goal 快照（active 降级 paused，防 resume 后自动续跑）
           goal.current.restore(data.goal);
@@ -1368,9 +1357,10 @@ export function App({
   const submit = useCallback(
     async (raw: string, opts?: { recordHistory?: boolean; silent?: boolean }) => {
       const text = raw.trim();
-      const images = pendingImages.current;
+      const extracted = extractImageContent(text, imageStore.current);
+      const imgCount = extracted.imageCount;
       // 有图片时允许空文本发送；纯空且无图才忽略
-      if (text === '' && images.length === 0) return;
+      if (extracted.displayText === '' && imgCount === 0) return;
       // 记录输入历史（非空 text，含斜杠命令与 busy 入队消息，在分发前记录；相邻去重）
       // 后台通知等合成消息不记（recordHistory === false），避免污染输入历史
       if (opts?.recordHistory !== false && text !== '' && inputHistoryStore.current.record(text)) {
@@ -1381,7 +1371,7 @@ export function App({
         if (text === '') return; // 图片输入 busy 时暂不入队（简化）
         // busy 时斜杠命令先解析分流：只读/纯 UI 命令（/help /goal /loop /sessions /lang 及无参查询）即时执行，
         // 改动 turn 前提的命令（/model /compact /new 等）与普通消息一样入队
-        if (images.length === 0) {
+        if (imgCount === 0) {
           const parsed = parseSlash(text, pluginCommandNames);
           if (parsed !== null && busyRoute(parsed.name, parsed.args) === 'instant') {
             setInput('');
@@ -1398,7 +1388,7 @@ export function App({
       if (pendingRef.current !== null || pendingPlanRef.current !== null || pendingQuestionRef.current !== null) return;
       setInput('');
       // 斜杠命令仅在无图片、纯命令时走命令分支；静默注入（cron/后台通知）不解析斜杠，防定时 prompt 被当成命令截获
-      if (!opts?.silent && images.length === 0 && handleSlash(text)) return;
+      if (!opts?.silent && imgCount === 0 && handleSlash(text)) return;
 
       // UserPromptSubmit hook：stdout 非空作为上下文注入本轮；exit 2 阻断本轮不发模型（输入退回输入框）
       if (hookEngine !== undefined && !opts?.silent) {
@@ -1412,12 +1402,11 @@ export function App({
         }
       }
 
-      const imgNote = images.length > 0 ? t('app.user.withImages', { count: images.length }) : '';
+      const imgNote = imgCount > 0 ? t('app.user.withImages', { count: imgCount }) : '';
       // 静默注入（cron 触发等合成消息）不在转录区显示 user 条目——cron 场景由触发卡片承载展示
-      if (!opts?.silent) setItems((prev) => [...prev, { kind: 'user', text: `${text}${imgNote}` }]);
-      history.current.push(stored({ role: 'user', content: buildUserContent(text, images) }, 'user'));
-      pendingImages.current = [];
-      setImageCount(0);
+      if (!opts?.silent) setItems((prev) => [...prev, { kind: 'user', text: `${extracted.displayText}${imgNote}` }]);
+      history.current.push(stored({ role: 'user', content: extracted.content }, 'user'));
+      imageStore.current.clear();
 
       // turn 边界 skill 指纹检测：目录有变更时静默全量重扫并提示（零成本：指纹未变直接跳过）
       const skillDiff = reloadSkills(false);
