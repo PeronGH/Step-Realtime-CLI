@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { searchHttpError } from './searchError.js';
 import { fail, ok, type ToolDef } from './types.js';
 
 const schema = z.object({
@@ -63,7 +64,14 @@ export const webSearchTool: ToolDef<z.infer<typeof schema>> = {
       return fail(`搜索请求失败：${(e as Error).message}`);
     }
     if (!res.ok) {
-      return fail(`搜索失败：HTTP ${res.status}。请检查 API key 与额度。`);
+      // 读响应体提取服务端真实错误（如 451 内容审核），避免一句「检查 key 与额度」误导所有非 2xx
+      let text = '';
+      try {
+        text = await res.text();
+      } catch {
+        // 响应体读取失败不影响错误上报
+      }
+      return fail(searchHttpError('搜索', res.status, text));
     }
 
     let data: { results?: SearchResult[] };

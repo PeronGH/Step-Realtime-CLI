@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { searchHttpError } from './searchError.js';
 import { fail, ok, type ToolDef } from './types.js';
 
 const schema = z.object({
@@ -55,7 +56,13 @@ export const imageSearchTool: ToolDef<z.infer<typeof schema>> = {
       return fail(`图片搜索请求失败：${(e as Error).message}`);
     }
     if (!res.ok) {
-      return fail(`图片搜索失败：HTTP ${res.status}。请检查 API key 与 Step Plan 额度。`);
+      let text = '';
+      try {
+        text = await res.text();
+      } catch {
+        // 响应体读取失败不影响错误上报
+      }
+      return fail(searchHttpError('图片搜索', res.status, text));
     }
 
     let data: ImageSearchResponse;
