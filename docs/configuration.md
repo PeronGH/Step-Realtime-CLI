@@ -30,6 +30,8 @@ provider = "stepfun"                 # 默认 stepfun（anthropic 协议）
 
 文件位置：`~/.step-code/config.toml`。
 
+只有用户级这一份，没有项目级 config.toml——配置文件位置即信任边界：项目目录里的配置文件不能静默注入 api_key、base_url 这类敏感项。项目粒度的定制走目录约定（项目级 skills、`.step-code/mcp.json`、AGENTS.md），这与 某竞品CLI、Codex 的设计一致（两家同样只有用户级主配置）。
+
 ### 顶层字段
 
 | 字段 | 类型 | 说明 |
@@ -43,6 +45,7 @@ provider = "stepfun"                 # 默认 stepfun（anthropic 协议）
 | `language` | string | 界面语言：`zh`（默认）/ `en` |
 | `agents_paths` | string[] | 覆盖 AGENTS.md 收集，见 [AGENTS.md 机制](./agents-md.md) |
 | `extra_skill_dirs` | string[] | 追加 skill 扫描目录，见[技能、插件与 MCP](./skills-and-mcp.md) |
+| `disabled_skills` | string[] | 按名排除 skill（任何来源生效），见[技能、插件与 MCP](./skills-and-mcp.md) |
 
 顶层 `provider` / `api_key` / `base_url` / `model` 是「单模型」的最简写法。要登记多个模型、多个渠道并在运行时切换，用下面的 `[providers]` + `[models]` 两张表。
 
@@ -117,14 +120,24 @@ Step 3.x 系列是恒思考模型，无论是否发送 thinking 字段，响应�
 [thinking]
 enabled = true         # 默认 false：不主动发 thinking 字段，保持既有请求行为
 budget_tokens = 8192   # 可选；思考预算，会 clamp 到 ≥1024
+default_level = "high" # 可选；默认档位（取 levels 中的档位名），其 budget 优先于 budget_tokens
+
+[thinking.levels]      # 可选；档位表（档位名 → budget），缺省 low=1024 / medium=4096 / high=32000
+low = 1024
+medium = 4096
+high = 32000
 ```
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `enabled` | false | 是否主动发送 `thinking` 请求字段。默认关，兼容对该字段报错的模型 |
 | `budget_tokens` | — | 思考 token 预算，clamp 到 ≥1024 |
+| `levels` | low/medium/high = 1024/4096/32000 | 档位表（档位名 → budget），自定义档位逐档做正文余量校验 |
+| `default_level` | — | 默认档位名（须命中 levels 表，否则加载时报配置错误），其 budget 作为请求默认，优先于 `budget_tokens` |
 
-启用时要求 `max_tokens - budget_tokens ≥ 2048`（给正文留最小余量，否则思考会吃满配额、正文零输出），不满足会在加载时报配置错误。
+启用时要求 `max_tokens - budget_tokens ≥ 2048`（给正文留最小余量，否则思考会吃满配额、正文零输出），不满足会在加载时报配置错误；自定义 levels 逐档同规则校验。
+
+运行时可用 `/think` 会话级切换档位（选择器/直切/off），见[交互使用](./interactive.md)。
 
 > `[thinking]` 段只对 **anthropic 协议**有效（`budget_tokens` 是 Anthropic 字段）。openai / openai_responses 协议下阶跃恒思考、无需也不发送该字段，此段配置被忽略；思考过程仍会正常渲染。
 

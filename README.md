@@ -13,7 +13,7 @@
 - 交互式 Ink 终端界面 + 单条指令的非交互模式（`-p`）
 - **多协议模型接入**：provider 层支持三种协议——`anthropic`（Anthropic Messages，适合 coding）、`openai`（OpenAI Chat Completions，适合 coding）、`openai_responses`（OpenAI Responses，纯对话、不支持工具调用）；阶跃 Step 系列（如 step-3.7-flash）三协议均可接入，默认走 stepfun 预设（anthropic 协议、流式输出、注入 prompt cache）
 - **多渠道模型体系**：config.toml 用 `[providers.<id>]` 声明渠道（`type` 选协议 + `base_url` + `api_key`）、`[models.<别名>]` 登记模型别名（挂渠道、带显示名/能力/上下文窗口）；`/model` 无参打开交互式选择器（模糊过滤、渠道列、当前项标记、切换有历史时提示 cache 失效），`/model <别名>` 直切，`--model 别名` 启动指定
-- **thinking 推理过程**：Step 恒思考模型的思考过程在 TUI 无条件呈现——流式期暗色滚动预览、完成后暗色斜体折叠块；`[thinking]` 段可配是否发送思考请求字段及 budget，`-p` 模式思考不进 stdout
+- **thinking 推理过程**：Step 恒思考模型的思考过程在 TUI 无条件呈现——流式期暗色滚动预览、完成后暗色斜体折叠块；`[thinking]` 段可配是否发送思考请求字段及 budget，`/think` 会话级选择思考深度档位（`[thinking.levels]` 档位表可配），状态栏显示当前档位；`-p` 模式思考不进 stdout
 - **计划模式（Plan Mode）**：`/plan` 进入后权限层硬拦所有写/执行工具，只放行只读调查与 `exit_plan_mode`；模型先调查、产出计划，经用户确认后才落地执行。它是独立维度，叠加在权限模式之上
 - **权限系统**：manual / auto / yolo 三档梯度——manual 写与执行都要确认，auto 写放行、`bash` 仍需确认，yolo 全放行；本会话批准过的工具可记住
 - **子 agent**：`spawn_agent` 派生子 agent（内置 `general` 全能 / `explore` 只读，支持 `.step-code/agents/*.md` 自定义）；全新上下文、角色化工具白名单、摘要回灌，可后台异步、可并行多个只读 explore
@@ -32,8 +32,8 @@
 - **折叠/展开工具输出**：工具结果默认折叠为摘要，Ctrl+O 全局展开/折叠完整输出
 - **输入框编辑**：自研单行输入组件，支持 Home/End、Ctrl+A/E、Ctrl+←/→ 与 Alt+B/F 词移动、Ctrl+W/U/K 删除键集
 - **图片粘贴**：Alt+V 从剪贴板粘贴图片随消息发送（走模型的 base64 图片理解；剪贴板读取目前 Windows 支持）
-- **可重试**：对网络 / 5xx / 限流错误指数退避重试，优先采用响应的 `Retry-After` 头；并行子 agent 遇 429 阶梯重排队
-- **会话持久化**：自动保存，`--continue` 续接、`--session` / `--resume` 指定、`/sessions` 查看、`/fork` 分叉、`/reflect` 沉淀方法论
+- **可重试**：对网络 / 5xx / 限流 / 空流·空响应错误指数退避重试（未输出内容才重试），优先采用响应的 `Retry-After` 头；并行子 agent 遇 429 阶梯重排队
+- **会话持久化**：自动保存，`--continue` 续接、`--session` / `--resume` 指定、`/sessions` 查看、`/fork` 分叉、`/reflect` 沉淀方法论；恢复时把历史对话重新渲染到终端（长会话按最近若干轮重放，恢复提示给出「轮次 · 条消息」双口径）
 - **上下文压缩**：接近上限时自动微压缩旧工具结果，`/compact` 触发全量摘要
 - **国际化**：`/lang` 在中英文界面间切换（写回 config.toml 持久化；也可直接配置 `language = "en"`）
 - 跨平台：文件操作走 Node 原生 API，`bash` 工具在 Windows 下自动探测 Git Bash
@@ -126,7 +126,7 @@ Step Code 在设计阶段参考了 **OpenAI Codex CLI**、**Claude Code**、**Op
 
 ## 状态
 
-已具备：工具循环、三档权限系统、**计划模式**、可中断、重试（含 `Retry-After` 优先）、prompt cache、会话持久化（续接 / 分叉 / 回顾）、上下文压缩、斜杠命令、stream-json 输出、内置联网搜索（网页 + 文搜图）、图片粘贴输入（Alt+V）、thinking 推理过程呈现、子 agent 与工作流编排、并行工具执行、自主目标（Goal，轮次 + token 双预算、随会话持久化）、后台任务与定时任务（Cron，按 cwd 持久化）、技能系统（Skill）、插件（skills + mcpServers + hooks + 命令）、用户可配置 hooks、MCP（stdio）、多渠道模型体系与交互式模型选择器、多协议接入（anthropic / openai / openai_responses）、国际化（中/英）。
+已具备：工具循环、三档权限系统、**计划模式**、可中断、重试（含 `Retry-After` 优先）、prompt cache、会话持久化（续接 / 分叉 / 回顾 / 恢复重放历史）、上下文压缩、斜杠命令、stream-json 输出、内置联网搜索（网页 + 文搜图）、图片粘贴输入（Alt+V）、thinking 推理过程呈现、子 agent 与工作流编排、并行工具执行、自主目标（Goal，轮次 + token 双预算、随会话持久化）、后台任务与定时任务（Cron，按 cwd 持久化）、技能系统（Skill）、插件（skills + mcpServers + hooks + 命令）、用户可配置 hooks、MCP（stdio）、多渠道模型体系与交互式模型选择器、多协议接入（anthropic / openai / openai_responses）、国际化（中/英）。
 
 CI 在 Ubuntu / Windows / macOS 三平台运行 typecheck + build + test。
 

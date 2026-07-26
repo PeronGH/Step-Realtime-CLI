@@ -26,12 +26,15 @@ when_to_use: 用户要求提交代码或生成 commit message 时
 
 ### 加载路径与优先级
 
-按扫描顺序，同名后者覆盖：
+按扫描顺序，同名后者覆盖（具体胜一般、原生胜兼容）：
 
-1. 项目级：`<项目>/.step-code/skills/`、`<项目>/.agents/skills/`
-2. 用户级：`~/.step-code/skills/`
-3. 追加目录：config.toml 的 `extra_skill_dirs`
-4. 插件提供：优先级最高
+1. 用户级：`~/.step-code/skills/`
+2. 项目级（兼容目录）：`<项目>/.agents/skills/`——与其他 CLI 共享的目录约定
+3. 项目级（原生目录）：`<项目>/.step-code/skills/`
+4. 追加目录：config.toml 的 `extra_skill_dirs`
+5. 插件提供：优先级最高
+
+同名 skill 只保留一份（清单不重复）；两个目录放了同名 skill 时，生效的是优先级高的那份。发生这种覆盖时，启动和重载后会明确提示冲突清单：哪个来源被采用、覆盖了谁，不会让旧版本悄悄遮蔽新版本。
 
 ```toml
 # ~/.step-code/config.toml：追加你的私有技能目录，与默认路径共存
@@ -39,6 +42,25 @@ extra_skill_dirs = ["~/my-private-skills"]
 ```
 
 追加目录里的同名技能会 shadow 项目级和用户级——个人修正团队技能的标准做法。路径支持 `~` 和相对工作目录。
+
+### 热加载与 `/skill reload`
+
+会话进行中新增、修改或删除 SKILL.md 不用重启：每个回合边界自动比对各 SKILL.md 的「路径 + 修改时间」指纹，有变更就全量重建注册表，并提示新增/移除/变更清单；重建后下一回合的 system prompt、`skill` 工具和子 agent 立即使用新清单。想立即刷新可随时手动执行：
+
+```
+/skill reload    # 强制全量重扫技能目录
+```
+
+重载后若存在同名冲突，会随重载结果一起提示。
+
+### 按名排除
+
+```toml
+# ~/.step-code/config.toml：任何来源的同名 skill 都不加载
+disabled_skills = ["team-noisy-skill"]
+```
+
+合并完成后统一过滤：项目级、用户级、追加目录、插件提供的同名 skill 都会被排除。典型场景是目录不归你管（团队仓库共享的 `.agents/skills/`），不能删文件，但想屏蔽个别技能。
 
 ## 插件（Plugin）
 

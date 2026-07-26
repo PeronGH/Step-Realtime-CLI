@@ -14,6 +14,8 @@ Ink 终端界面：顶部欢迎框，中间是会话流（你的输入、模型�
 
 工具输出默认折叠为一行摘要（「N 行输出 · Ctrl+O 展开」），Ctrl+O 在生成期间临时展开看全文；定稿入历史后恒为折叠摘要，保证历史紧凑。
 
+恢复会话（`step -r` / `/resume`）时，历史对话会重新渲染到终端，和实时看起来一致；长会话默认只重放最近若干轮，更早的在顶部提示已折叠。详见[会话管理](./sessions.md#恢复时重放历史内容)。
+
 ## 斜杠命令
 
 敲 `/` 弹出命令菜单，↑↓ 选择、Tab 补全、Enter 执行。
@@ -22,6 +24,7 @@ Ink 终端界面：顶部欢迎框，中间是会话流（你的输入、模型�
 |------|------|
 | `/help`（`/?`） | 查看全部命令 |
 | `/model` | 切换模型：无参打开交互式选择器，`/model <别名>` 直切 |
+| `/think` | 思考深度：无参打开档位选择器，`/think <档位>` 直切，`/think off` 本会话停发 thinking 字段 |
 | `/provider` | 切换服务商预设（stepfun / anthropic / openai / openai_responses） |
 | `/permission` | 查看/切换权限模式 |
 | `/yolo` `/auto` | 快捷切到对应权限档 |
@@ -34,6 +37,7 @@ Ink 终端界面：顶部欢迎框，中间是会话流（你的输入、模型�
 | `/reflect` | 回顾本次对话，沉淀方法论经验 |
 | `/sessions` `/resume` | 浏览并恢复历史会话 |
 | `/skill <名称> [参数]` | 手动激活技能 |
+| `/skill reload` | 强制重扫技能目录（会话中改动 SKILL.md 后即时生效；回合边界也会自动检测） |
 | `/plugin` | 管理插件：`install / list / enable / disable / remove / info` |
 | `/mcp` | 查看 MCP server 连接状态 |
 | `/lang` | 切换中英文界面 |
@@ -88,6 +92,8 @@ Ink 终端界面：顶部欢迎框，中间是会话流（你的输入、模型�
 - 当前会话已有历史时，选择器顶部会警告「切换模型会使已有 prompt cache 失效，`/new` 开新会话可避免额外 token 消耗」。
 
 `/model <别名>` 是文本直切，跳过选择器。两种方式确认后都会按别名的合并配置重建 provider，上下文窗口随之跟随，状态栏显示新模型的显示名。切换只影响当前进程，不写回 config.toml。
+
+`/think` 控制思考深度（仅 anthropic 协议且已启用 `[thinking]` 的渠道可用）：无参打开档位选择器（会话忙时退化为文本列表），`/think <档位>` 直切，`/think off` 本会话不再发送 thinking 字段。档位表来自 `[thinking.levels]`（缺省 low/medium/high = 1024/4096/32000），状态栏模型名旁显示当前档位。切换只影响当前会话，不写回 config.toml（持久化用 `default_level`）；会话已有历史时切换会提示 prompt cache 失效。
 
 ## 推理过程显示
 
