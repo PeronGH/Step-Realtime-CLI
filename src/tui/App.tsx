@@ -1498,7 +1498,10 @@ export function App({
           entry.kind === 'welcome' ? (
             <WelcomeBox key="welcome" cwd={ctx.cwd} sessionId={sessionRef.current.id} model={model} version={VERSION} />
           ) : (
-            <MessageItem key={i} item={entry} expanded={expanded} />
+            // Static 恒折叠渲染：ink <Static> append-only，条目进 scrollback 时渲染结果即冻结。
+            // 若带上 Ctrl+O 的 expanded 真值，展开态会被永久冻进历史，事后 Ctrl+O 无法收回
+            //（空闲时条目全在 Static，Ctrl+O 看似失效）。展开只是动态区的临时视图，历史恒紧凑。
+            <MessageItem key={i} item={entry} expanded={false} />
           )
         }
       </Static>
