@@ -17,6 +17,8 @@ export function previewEntry(text: string): string {
  * 发送队列预览面板（替换原单行横幅）：
  * 标题行说明消费时机（回合结束按序发送 · Esc 中断后立即续发），
  * 逐条 `  ↳ ` 预览、dim 色、每条最多 2 行，超过 3 条只显示前 3 条并折叠计数。
+ * 每行独立 Text + wrap=truncate：行数截行数、宽度截宽度，
+ * 长行不再折行，动态区高度预算按渲染行数精确成立。
  * 数据来自 App 的 queue.current；空队列不渲染。
  */
 export function QueuePreview({ queue }: { queue: string[] }): React.ReactElement | null {
@@ -25,15 +27,19 @@ export function QueuePreview({ queue }: { queue: string[] }): React.ReactElement
   const rest = queue.length - shown.length;
   return (
     <Box flexDirection="column">
-      <Text color="gray">{t('app.queue.previewTitle', { count: queue.length })}</Text>
-      {shown.map((q, i) => (
-        <Text key={i} color="gray" dimColor>
-          {'  ↳ '}
-          {previewEntry(q)}
-        </Text>
-      ))}
+      <Text color="gray" wrap="truncate">{t('app.queue.previewTitle', { count: queue.length })}</Text>
+      {shown.map((q, i) =>
+        previewEntry(q)
+          .split('\n')
+          .map((line, j) => (
+            <Text key={`${i}:${j}`} color="gray" dimColor wrap="truncate">
+              {j === 0 ? '  ↳ ' : ''}
+              {line}
+            </Text>
+          )),
+      )}
       {rest > 0 ? (
-        <Text color="gray" dimColor>
+        <Text color="gray" dimColor wrap="truncate">
           {t('app.queue.previewMore', { count: rest })}
         </Text>
       ) : null}

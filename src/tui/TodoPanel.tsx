@@ -11,7 +11,7 @@ export function TodoPanel({ todos }: { todos: readonly TodoItem[] }): React.Reac
   const rest = todos.length - visible.length;
   return (
     <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
-      <Text color="cyan" bold>
+      <Text color="cyan" bold wrap="truncate">
         {t('todo.title')}
       </Text>
       {visible.map((t, i) => {
@@ -19,12 +19,13 @@ export function TodoPanel({ todos }: { todos: readonly TodoItem[] }): React.Reac
         const color = t.status === 'done' ? 'green' : t.status === 'in_progress' ? 'cyan' : 'gray';
         const strike = t.status === 'done';
         return (
-          <Text key={i} color={color} strikethrough={strike}>
+          // 长 title 截断到一行（wrap=truncate），保证动态区高度预算按 1 行/条精确成立
+          <Text key={i} color={color} strikethrough={strike} wrap="truncate">
             {`${mark} ${t.title}`}
           </Text>
         );
       })}
-      {rest > 0 ? <Text color="gray">{t('todo.more', { count: rest })}</Text> : null}
+      {rest > 0 ? <Text color="gray" wrap="truncate">{t('todo.more', { count: rest })}</Text> : null}
     </Box>
   );
 }

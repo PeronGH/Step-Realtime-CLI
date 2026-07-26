@@ -48,7 +48,7 @@ export function AgentGroup({ agents }: { agents: SubagentProgress[] }): React.Re
 
   return (
     <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold>
+      <Text color="cyan" bold wrap="truncate">
         {allDone ? '✓' : '⠶'} {header}
       </Text>
       {agents.map((a, i) => {
@@ -68,13 +68,14 @@ export function AgentGroup({ agents }: { agents: SubagentProgress[] }): React.Re
                 : t('agentGroup.status.queued');
         return (
           <Box key={i} flexDirection="column">
-            <Text>
+            {/* 长 description / activity 截断到一行，动态区高度预算按 1 行/条精确成立 */}
+            <Text wrap="truncate">
               {branch} <Text color="white">{a.type}</Text>
               <Text color="gray"> · {a.description} · {a.toolCount} tools · </Text>
               <Text color={statusColor}>{statusMark} {statusText}</Text>
             </Text>
             {a.status === 'running' && a.activity !== undefined && a.activity !== '' ? (
-              <Text color="gray">    {a.activity}</Text>
+              <Text color="gray" wrap="truncate">    {a.activity}</Text>
             ) : null}
           </Box>
         );

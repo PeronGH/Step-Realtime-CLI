@@ -16,14 +16,16 @@ export const THINKING_PREVIEW_LINES = 3;
  * 流式期思考预览（挂在动态区状态行位置，不进历史区）：
  * 「思考中…」+ 尾部数行暗色滚动预览；思考完成后由 App 落成 kind:'thinking' 定稿条目。
  */
-export function ThinkingPreview({ text }: { text: string }): React.ReactElement {
-  const tail = text.split('\n').slice(-THINKING_PREVIEW_LINES);
+export function ThinkingPreview({ text, maxLines = THINKING_PREVIEW_LINES }: { text: string; maxLines?: number }): React.ReactElement {
+  // maxLines 由 App 的 chrome 降级预算给出（可能小于默认值）；保底 1 行避免 slice(-0) 全量返回
+  const tail = text.split('\n').slice(-Math.max(maxLines, 1));
   return (
     <Box flexDirection="column">
-      <Text color="gray">{t('thinking.streaming')}</Text>
+      <Text color="gray" wrap="truncate">{t('thinking.streaming')}</Text>
       {tail.map((line, i) => (
-        // 逐行 key 用下标即可：预览整体随流式增量重渲，无复用诉求
-        <Text key={i} color="gray">
+        // 逐行 key 用下标即可：预览整体随流式增量重渲，无复用诉求；
+        // wrap=truncate：长行截断不折行，高度预算按行数精确成立
+        <Text key={i} color="gray" wrap="truncate">
           {line}
         </Text>
       ))}

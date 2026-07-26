@@ -1,5 +1,5 @@
 import { Box, Text, measureElement, type DOMElement } from 'ink';
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { t } from '../i18n.js';
 
 /**
@@ -14,7 +14,8 @@ import { t } from '../i18n.js';
  * - justifyContent=flex-end 锚底：内容超限时顶部被裁，保留最后 N 行（行级裁剪，
  *   不是 item 级——单个超长 item 同样被截尾）；
  * - 内层 flexShrink=0 保持自然高度，measureElement 量出真实行数，换算被裁行数，
- *   顶部补一行「已隐藏 N 行」指示（指示晚一帧出现，仅影响文案，不影响帧高不变量）。
+ *   顶部补一行「已隐藏 N 行」指示；测量用 useLayoutEffect 在 commit 阶段同步完成，
+ *   指示行与裁剪同一帧生效，消除帧间高度抖动（useEffect 会晚一帧插入指示行）。
  */
 export function LiveViewport({
   maxRows,
@@ -26,9 +27,9 @@ export function LiveViewport({
 }): React.ReactElement {
   const innerRef = useRef<DOMElement>(null);
   const [natural, setNatural] = useState<number | null>(null);
-  // 每次提交后量一次内容自然高度（流式增长、条目定稿移入 Static 收缩都要追）；
+  // 每次提交同步量一次内容自然高度（流式增长、条目定稿移入 Static 收缩都要追）；
   // 同值不 setState，避免测量触发的二次渲染自我循环。
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (innerRef.current !== null) {
       const { height } = measureElement(innerRef.current);
       setNatural((prev) => (prev === height ? prev : height));
@@ -40,7 +41,7 @@ export function LiveViewport({
   const hidden = clipping ? natural - avail : 0;
   return (
     <Box flexDirection="column">
-      {clipping ? <Text color="gray">{t('liveViewport.hiddenLines', { count: hidden })}</Text> : null}
+      {clipping ? <Text color="gray" wrap="truncate">{t('liveViewport.hiddenLines', { count: hidden })}</Text> : null}
       <Box flexDirection="column" maxHeight={avail} overflow="hidden" justifyContent="flex-end">
         <Box ref={innerRef} flexDirection="column" flexShrink={0}>
           {children}

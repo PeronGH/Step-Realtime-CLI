@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from 'ink';
 import { useEffect, useRef, useState } from 'react';
-import { SLASH_COMMANDS } from './commands.js';
+import { SLASH_COMMANDS, type SlashCommand } from './commands.js';
+import { displayWidth } from './liveBudget.js';
 import { initialNavState, navigateHistory } from '../session/inputHistory.js';
 import { insertText, resolveEditAction } from './promptEdit.js';
 import { useSpinnerFrame, BRAILLE_FRAMES } from './useSpinnerFrame.js';
@@ -82,16 +83,8 @@ export function PromptInput({
   }, [busy]);
 
   // 斜杠命令补全：输入以 / 开头且无空格时，过滤匹配命令
-  const slashQuery = value.startsWith('/') && !/\s/.test(value) ? value.slice(1).toLowerCase() : null;
-  const matches =
-    slashQuery !== null
-      ? SLASH_COMMANDS.filter(
-          (c) =>
-            c.name.toLowerCase().startsWith(slashQuery) ||
-            (c.aliases ?? []).some((a) => a.toLowerCase().startsWith(slashQuery)),
-        )
-      : [];
-  const menuVisible = slashQuery !== null && matches.length > 0;
+  const matches = matchSlashCommands(value);
+  const menuVisible = matches.length > 0;
 
   // 弹层不可见时，↑↓ 做 shell 式输入历史回溯（配 bash 风格草稿暂存）。
   useInput(
@@ -179,7 +172,7 @@ export function PromptInput({
           {matches.slice(menuStart, menuStart + MENU_WINDOW).map((c, i) => {
             const selected = menuStart + i === selIdx;
             return (
-              <Text key={c.name} color={selected ? 'cyan' : 'gray'} bold={selected}>
+              <Text key={c.name} color={selected ? 'cyan' : 'gray'} bold={selected} wrap="truncate">
                 {selected ? '› ' : '  '}
                 <Text color={selected ? 'cyan' : 'white'}>/{c.name}</Text>
                 {'  '}
@@ -200,11 +193,52 @@ export function PromptInput({
         </Text>
         <Text>{renderEditableText(value, cursor, busy ? t('input.placeholder.busy') : t('input.placeholder.idle'))}</Text>
       </Box>
-      {busy && tip ? <Text color="gray">{t('input.tipPrefix', { tip })}</Text> : null}
-      {!busy && primed ? <Text color="yellow">{t('input.backtrackPrimed')}</Text> : null}
-      {!busy && exitPrimed ? <Text color="yellow">{t('input.exitPrimed')}</Text> : null}
+      {busy && tip ? <Text color="gray" wrap="truncate">{t('input.tipPrefix', { tip })}</Text> : null}
+      {!busy && primed ? <Text color="yellow" wrap="truncate">{t('input.backtrackPrimed')}</Text> : null}
+      {!busy && exitPrimed ? <Text color="yellow" wrap="truncate">{t('input.exitPrimed')}</Text> : null}
     </Box>
   );
+}
+
+/** 斜杠命令补全匹配：输入以 / 开头且无空格时，按前缀过滤命令名与别名。 */
+export function matchSlashCommands(value: string): SlashCommand[] {
+  const query = value.startsWith('/') && !/\s/.test(value) ? value.slice(1).toLowerCase() : null;
+  if (query === null) return [];
+  return SLASH_COMMANDS.filter(
+    (c) =>
+      c.name.toLowerCase().startsWith(query) ||
+      (c.aliases ?? []).some((a) => a.toLowerCase().startsWith(query)),
+  );
+}
+
+export interface PromptRowOptions {
+  busy: boolean;
+  /** backtrack primed 提示行（仅空闲时显示）。 */
+  primed?: boolean;
+  /** 退出确认 primed 提示行（仅空闲时显示）。 */
+  exitPrimed?: boolean;
+  /** 终端列数（未知时调用方给保守默认 80）。 */
+  columns: number;
+}
+
+/**
+ * 输入区实际占用行数（动态区高度预算用，与上方渲染结构一一对应）：
+ * 斜杠菜单（边框 2 + 窗口 ≤MENU_WINDOW 条 + 页码行 ≤1）
+ * + 输入框（边框 2 + 内容按终端宽度折行，长粘贴/窄终端不再漏算）
+ * + busy tip / primed 提示各 ≤1。菜单条目与提示行均 wrap=truncate 单行截断。
+ */
+export function computePromptRows(value: string, opts: PromptRowOptions): number {
+  const matches = matchSlashCommands(value);
+  const menuRows =
+    matches.length > 0 ? 2 + Math.min(matches.length, MENU_WINDOW) + (matches.length > MENU_WINDOW ? 1 : 0) : 0;
+  // 输入框内容区可用宽度：边框 2 + 内边距 2 + 前缀（spinner/› + 空格）2
+  const contentWidth = Math.max(opts.columns - 6, 1);
+  const inputLines = Math.max(1, Math.ceil(displayWidth(value) / contentWidth));
+  const tipRows =
+    (opts.busy ? 1 : 0) +
+    (!opts.busy && (opts.primed ?? false) ? 1 : 0) +
+    (!opts.busy && (opts.exitPrimed ?? false) ? 1 : 0);
+  return menuRows + inputLines + 2 + tipRows;
 }
 
 /**

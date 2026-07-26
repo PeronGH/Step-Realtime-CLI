@@ -33,10 +33,11 @@ import { expandPluginCommand, type PluginCommand } from '../plugin/manager.js';
 import { formatMcpStatus } from '../mcp/status.js';
 import type { McpManager } from '../mcp/manager.js';
 import { formatElapsed } from './elapsed.js';
-import { computeLiveMaxRows, INPUT_AREA_ROWS, STATUS_BAR_ROWS } from './LiveViewport.js';
+import { STATUS_BAR_ROWS } from './LiveViewport.js';
+import { computeLiveBudget, logRenderBudget } from './liveBudget.js';
 import { MessageItem, MessageList, ThinkingPreview, THINKING_PREVIEW_LINES, countSettledItems } from './MessageList.js';
 import { ModelPicker, type ModelPickerItem } from './ModelPicker.js';
-import { PromptInput } from './PromptInput.js';
+import { PromptInput, computePromptRows } from './PromptInput.js';
 import { QueuePreview } from './QueuePreview.js';
 import { computeBacktrack, truncateItemsAtLastUser } from './backtrack.js';
 import { StatusBar } from './StatusBar.js';
@@ -1430,55 +1431,65 @@ export function App({
   const liveItems = items.slice(settledCount);
 
   // 动态区高度预算（滚动跳顶修复：Ink 在动态帧 ≥ 终端行数时全量清屏、\x1b[3J 清 scrollback，
-  // 用户向上滚动被拽回顶部；预算保证动态帧恒 < 一屏）。chrome 按 App 实际渲染结构实测校准：
-  // 常态 = 输入区 4（输入框 3 + tip/提示 1）+ 状态栏 2；审批/计划/提问/模型选择弹层替换输入区时，
-  // 按各组件实测结构估算其行数；条件面板（TodoPanel/AgentGroup/QueuePreview/图片横幅）可见时逐块累加。
-  let chromeRows = STATUS_BAR_ROWS;
+  // 用户向上滚动被拽回顶部；预算保证动态帧恒 ≤ 终端行数 − 1，详见 liveBudget.ts）。
+  // 固定部分 = 状态栏 + 输入区/弹层 + AgentGroup + 图片横幅；可选面板（QueuePreview/TodoPanel/
+  // 思考预览）由 computeLiveBudget 在 chrome 逼近一屏时按优先级降级。
+  // 输入区/弹层行数：弹层替换输入区时按各组件实测结构估算；常态用 computePromptRows 按输入内容
+  // 实测——斜杠菜单、长输入折行都计入，不再是恒定 4 行（busy 期间敲 / 必超屏的洞即出于此）。
+  let promptRows: number;
   if (pendingQuestion !== null) {
-    chromeRows += estimateQuestionRows(pendingQuestion);
+    promptRows = estimateQuestionRows(pendingQuestion);
   } else if (pendingPlan !== null) {
     // 计划确认框：margin 1 + 边框 2 + 标题 1 + 计划正文 N 行 + 提示 1
-    chromeRows += 5 + pendingPlan.plan.split('\n').length;
+    promptRows = 5 + pendingPlan.plan.split('\n').length;
   } else if (pending !== null) {
-    chromeRows += estimateApprovalRows(pending);
+    promptRows = estimateApprovalRows(pending);
   } else if (modelPickerOpen) {
     // 模型选择器：margin 1 + 边框 2 + 标题 1 + 搜索 1 + 提示 1 + 当前页（≤10）+ 页码/缓存警告各 ≤1
-    chromeRows +=
+    promptRows =
       6 +
       Math.min(modelPickerItems.length, 10) +
       (modelPickerItems.length > 10 ? 1 : 0) +
       (history.current.length > 0 ? 1 : 0);
   } else {
-    chromeRows += INPUT_AREA_ROWS;
+    promptRows = computePromptRows(input, {
+      busy,
+      primed: backtrackPrimed,
+      exitPrimed,
+      columns: stdout?.columns ?? 80,
+    });
   }
-  // TodoPanel：margin 1 + 边框 2 + 标题 1 + 最多 5 条 + 「+N more」1
-  if (todos.current.length > 0) {
-    chromeRows += 5 + Math.min(todos.current.length, 5) + (todos.current.length > 5 ? 1 : 0);
-  }
-  // AgentGroup：margin 1 + 边框 2 + 头部 1 + 每个子 agent 1 行（running 带活动描述再 +1）
-  if (subagents.length > 0) {
-    chromeRows +=
-      4 +
-      subagents.reduce(
-        (n, a) => n + 1 + (a.status === 'running' && a.activity !== undefined && a.activity !== '' ? 1 : 0),
-        0,
-      );
-  }
-  // QueuePreview：标题 1 + 前 3 条每条 ≤ 2 行 + 「还有 N 条」1
-  if (queueLen > 0) {
-    chromeRows +=
-      1 +
-      queue.current.slice(0, 3).reduce((n, q) => n + Math.min(2, q.split('\n').length), 0) +
-      (queueLen > 3 ? 1 : 0);
-  }
-  // 图片横幅：单行
-  if (imageCount > 0) chromeRows += 1;
-  // 思考流式预览：标题 1 + 尾部 ≤THINKING_PREVIEW_LINES 行
-  if (thinkingPreview !== '') {
-    chromeRows += 1 + Math.min(thinkingPreview.split('\n').length, THINKING_PREVIEW_LINES);
-  }
+  const budget = computeLiveBudget(stdout?.rows, {
+    statusRows: STATUS_BAR_ROWS,
+    promptRows,
+    // TodoPanel：margin 1 + 边框 2 + 标题 1 + 最多 5 条 + 「+N more」1（条目已 wrap=truncate 单行）
+    todoRows:
+      todos.current.length > 0 ? 5 + Math.min(todos.current.length, 5) + (todos.current.length > 5 ? 1 : 0) : 0,
+    // AgentGroup：margin 1 + 边框 2 + 头部 1 + 每个子 agent 1 行（running 带活动描述再 +1）
+    agentRows:
+      subagents.length > 0
+        ? 4 +
+          subagents.reduce(
+            (n, a) => n + 1 + (a.status === 'running' && a.activity !== undefined && a.activity !== '' ? 1 : 0),
+            0,
+          )
+        : 0,
+    // QueuePreview：标题 1 + 前 3 条每条 ≤ 2 行 + 「还有 N 条」1
+    queueRows:
+      queueLen > 0
+        ? 1 +
+          queue.current.slice(0, 3).reduce((n, q) => n + Math.min(2, q.split('\n').length), 0) +
+          (queueLen > 3 ? 1 : 0)
+        : 0,
+    // 图片横幅：单行
+    imageRows: imageCount > 0 ? 1 : 0,
+    // 思考流式预览：标题 1 + 尾部 ≤THINKING_PREVIEW_LINES 行（各行 wrap=truncate）
+    thinkingRows:
+      thinkingPreview !== '' ? 1 + Math.min(thinkingPreview.split('\n').length, THINKING_PREVIEW_LINES) : 0,
+  });
+  logRenderBudget(stdout?.rows, budget);
   // stdout.rows 随 resize 自动更新，预算随之重算；非 TTY / 测试环境无 rows → undefined 不窗口化
-  const liveMaxRows = computeLiveMaxRows(stdout?.rows, chromeRows);
+  const liveMaxRows = budget.liveMaxRows;
 
   return (
     <Box flexDirection="column">
@@ -1492,10 +1503,10 @@ export function App({
         }
       </Static>
       <MessageList items={liveItems} expanded={expanded} busy={busy} maxRows={liveMaxRows} />
-      {thinkingPreview !== '' ? <ThinkingPreview text={thinkingPreview} /> : null}
+      {budget.thinkingRows > 0 ? <ThinkingPreview text={thinkingPreview} maxLines={budget.thinkingRows - 1} /> : null}
       <AgentGroup agents={subagents} />
-      <TodoPanel todos={todos.current} />
-      {queueLen > 0 ? <QueuePreview queue={queue.current} /> : null}
+      {budget.showTodos ? <TodoPanel todos={todos.current} /> : null}
+      {budget.showQueue ? <QueuePreview queue={queue.current} /> : null}
       {imageCount > 0 ? (
         <Box>
           <Text color="cyan">{t('app.image.banner', { count: imageCount })}</Text>
