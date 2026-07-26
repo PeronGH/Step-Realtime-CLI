@@ -83,6 +83,55 @@ describe('edit_file', () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain('未找到');
   });
+
+  it('LF 的 old_string 能匹配 CRLF 文件（换行符归一化 fallback）', async () => {
+    writeFileSync(join(dir, 'crlf.txt'), 'line1\r\nline2\r\nline3');
+    const r = await executeTool(
+      'edit_file',
+      { path: 'crlf.txt', old_string: 'line1\nline2', new_string: 'line1\nCHANGED' },
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    // 写回后仍保留 CRLF 风格，不被污染成 LF
+    expect(readFileSync(join(dir, 'crlf.txt'), 'utf8')).toBe('line1\r\nCHANGED\r\nline3');
+  });
+
+  it('CRLF 文件替换后不产生 \\r\\r\\n 双重换行', async () => {
+    writeFileSync(join(dir, 'crlf2.txt'), 'a\r\nb\r\nc');
+    const r = await executeTool(
+      'edit_file',
+      { path: 'crlf2.txt', old_string: 'a\nb\nc', new_string: 'x\ny\nz' },
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    const out = readFileSync(join(dir, 'crlf2.txt'), 'utf8');
+    expect(out).toBe('x\r\ny\r\nz');
+    expect(out).not.toContain('\r\r');
+  });
+
+  it('纯 LF 文件保持 LF，不被转成 CRLF', async () => {
+    writeFileSync(join(dir, 'lf.txt'), 'p\nq\nr');
+    const r = await executeTool(
+      'edit_file',
+      { path: 'lf.txt', old_string: 'p\nq', new_string: 'p\nQ' },
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    const out = readFileSync(join(dir, 'lf.txt'), 'utf8');
+    expect(out).toBe('p\nQ\nr');
+    expect(out).not.toContain('\r');
+  });
+
+  it('CRLF 文件的多处匹配 + replace_all', async () => {
+    writeFileSync(join(dir, 'crlf3.txt'), 'TODO\r\nkeep\r\nTODO');
+    const r = await executeTool(
+      'edit_file',
+      { path: 'crlf3.txt', old_string: 'TODO', new_string: 'DONE', replace_all: true },
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    expect(readFileSync(join(dir, 'crlf3.txt'), 'utf8')).toBe('DONE\r\nkeep\r\nDONE');
+  });
 });
 
 describe('list_dir / glob / grep', () => {

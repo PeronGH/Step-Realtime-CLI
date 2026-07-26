@@ -32,7 +32,31 @@ export const editFileTool: ToolDef<z.infer<typeof schema>> = {
       return fail('old_string 与 new_string 相同，无需编辑。');
     }
 
-    const occurrences = text.split(input.old_string).length - 1;
+    // 换行符处理：模型生成的 old_string 通常是 LF，而 Windows 文件多为 CRLF，
+    // 逐字符精确匹配会因 \r 失配而报「未找到」。策略：
+    // 1. 先按原样精确匹配（不破坏任何已能工作的场景）；
+    // 2. 精确匹配失败时，把三方都归一化为 LF 再匹配（容忍换行符差异）；
+    // 3. 写回时按文件原有换行风格恢复（CRLF 文件不被污染成 LF）。
+    const toLF = (s: string): string => s.replace(/\r\n/g, '\n');
+
+    let searchText = text;
+    let oldStr = input.old_string;
+    let newStr = input.new_string;
+
+    let occurrences = searchText.split(oldStr).length - 1;
+    if (occurrences === 0) {
+      // fallback：归一化换行符后重试匹配
+      const normText = toLF(text);
+      const normOld = toLF(input.old_string);
+      const normCount = normText.split(normOld).length - 1;
+      if (normCount > 0) {
+        searchText = normText;
+        oldStr = normOld;
+        newStr = toLF(input.new_string);
+        occurrences = normCount;
+      }
+    }
+
     if (occurrences === 0) {
       return fail('未找到 old_string。请先 read_file 确认原文（含缩进与换行）后再试。');
     }
@@ -42,10 +66,16 @@ export const editFileTool: ToolDef<z.infer<typeof schema>> = {
       );
     }
 
-    const next =
+    let next =
       input.replace_all === true
-        ? text.split(input.old_string).join(input.new_string)
-        : text.replace(input.old_string, input.new_string);
+        ? searchText.split(oldStr).join(newStr)
+        : searchText.replace(oldStr, newStr);
+
+    // 若匹配走了归一化路径（searchText 已是 LF），按文件原有换行风格写回。
+    // 判定「文件原本是否为 CRLF」：只要出现过 \r\n 就视为 CRLF 文件，统一转回 CRLF。
+    if (searchText !== text && /\r\n/.test(text)) {
+      next = next.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+    }
 
     try {
       writeFileSync(abs, next, 'utf8');
