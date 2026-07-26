@@ -171,8 +171,6 @@ export function App({
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<AskUserRequest | null>(null);
   const [expanded, setExpanded] = useState(false);
-  // 输入框里当前有效图片占位符数（从 input 派生，占位符增删自动跟随）。
-  const imageCount = useMemo(() => imageStore.current.activeIds(input).length, [input]);
   const [, setTodoTick] = useState(0);
   // <Static> 重挂载计数：/new、/resume 整体重置 items 时递增，key 驱动 Static 重建
   // （Static 内部只按数组长度追加渲染，数组变短不重挂会丢条目；重挂后 ink 丢弃旧静态输出重放新实例）。
@@ -204,6 +202,8 @@ export function App({
   const pendingRef = useRef<ApprovalRequest | null>(null);
   const approvalResolver = useRef<((r: { allow: boolean; feedback?: string }) => void) | null>(null);
   const imageStore = useRef<ImageAttachmentStore>(new ImageAttachmentStore());
+  // 输入框里当前有效图片占位符数（从 input 派生，占位符增删自动跟随）。必须在 imageStore 定义之后声明。
+  const imageCount = useMemo(() => imageStore.current.activeIds(input).length, [input]);
   const pendingPlanRef = useRef<PendingPlan | null>(null);
   const planResolver = useRef<((approved: boolean) => void) | null>(null);
   // 询问用户：双 ref 模式（照抄审批/计划）。发起时存 resolve + setPending 触发渲染，答完/取消 resolve 恢复 generator。

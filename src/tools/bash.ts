@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { fail, ok, type ToolContext, type ToolDef, type ToolResult } from './types.js';
+import { resolveShell, winPathToWsl, rewriteNulRedirect, type ResolvedShell } from './shellResolve.js';
 
 const schema = z.object({
   command: z.string().describe('要执行的 shell 命令。'),
@@ -23,24 +23,29 @@ const MAX_OUTPUT = 30_000;
 /** 前台运行期间收集的部分输出上限（对齐原 spawnSync maxBuffer）。 */
 const MAX_COLLECT = 10 * 1024 * 1024;
 
-/** 在 Windows 上定位 Git Bash，找不到则回退到系统默认 shell。 */
-function resolveShell(): { cmd: string; args: (command: string) => string[] } {
-  if (process.platform === 'win32') {
-    const candidates = [
-      process.env['SHELL'],
-      'C:\\Program Files\\Git\\bin\\bash.exe',
-      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-      `${process.env['LOCALAPPDATA'] ?? ''}\\Programs\\Git\\bin\\bash.exe`,
-    ].filter((p): p is string => typeof p === 'string' && p.length > 0);
-    for (const c of candidates) {
-      if (existsSync(c)) {
-        return { cmd: c, args: (command) => ['-c', command] };
-      }
-    }
-    // 回退到 cmd.exe
-    return { cmd: 'cmd.exe', args: (command) => ['/c', command] };
+/**
+ * 按 shell family 预处理命令与工作目录。
+ * - WSL：wsl.exe 是 Windows 程序，cwd 传原生 Windows 路径给 spawn；bash 内部工作目录
+ *   通过命令前加 `cd /mnt/...` 显式切换。同时把 NUL 重定向改写成 /dev/null。
+ * - posix/busybox：cwd 直接用原生路径（Git Bash 的 bash.exe 认 Windows 路径，转 /c/ 反而报错）；
+ *   NUL 重定向改写成 /dev/null。
+ * - powershell/cmd：命令与 cwd 原样透传。
+ * 返回处理后的 command 与传给 spawn 的 cwd。
+ */
+function prepareCommand(
+  command: string,
+  shell: ResolvedShell,
+  cwd: string,
+): { command: string; cwd: string } {
+  if (shell.family === 'wsl') {
+    const wslCwd = winPathToWsl(cwd);
+    const withCd = wslCwd ? `cd '${wslCwd.replace(/'/g, "'\\''")}' && ${command}` : command;
+    return { command: rewriteNulRedirect(withCd), cwd };
   }
-  return { cmd: process.env['SHELL'] ?? '/bin/bash', args: (command) => ['-c', command] };
+  if (shell.family === 'posix' || shell.family === 'busybox') {
+    return { command: rewriteNulRedirect(command), cwd };
+  }
+  return { command, cwd };
 }
 
 /** 截断超长输出（保留头部，与原 spawnSync 路径一致）。 */
@@ -59,7 +64,8 @@ function truncateOutput(out: string): string {
  */
 function runForeground(
   command: string,
-  shell: { cmd: string; args: (command: string) => string[] },
+  shell: ResolvedShell,
+  spawnCwd: string,
   ctx: ToolContext,
   timeoutSec: number,
 ): Promise<ToolResult> {
@@ -70,7 +76,7 @@ function runForeground(
     }
     let proc: ChildProcess;
     try {
-      proc = spawn(shell.cmd, shell.args(command), { cwd: ctx.cwd });
+      proc = spawn(shell.cmd, shell.args(command), { cwd: spawnCwd });
     } catch (e) {
       resolve(fail(`命令执行异常：${(e as Error).message}`));
       return;
@@ -155,10 +161,16 @@ function runForeground(
 export const bashTool: ToolDef<z.infer<typeof schema>> = {
   name: 'bash',
   description:
-    '执行一条 shell 命令并返回合并后的 stdout+stderr。在 Windows 上通过 Git Bash 运行（使用 Unix 语法）。避免交互式或永不结束的命令。run_in_background=true 时后台执行并立即返回 task_id。前台超时后命令自动转为后台任务继续运行。',
+    '执行一条 shell 命令并返回合并后的 stdout+stderr。Windows 上优先用 Git Bash（Unix 语法），无则回退 WSL/busybox/PowerShell。避免交互式或永不结束的命令。run_in_background=true 时后台执行并立即返回 task_id。前台超时后命令自动转为后台任务继续运行。',
   schema,
   async execute(input, ctx) {
     const shell = resolveShell();
+    if (shell.family === 'none') {
+      return fail(
+        'Windows 上未找到可用的 shell 解释器（Git Bash / WSL / busybox / PowerShell 都没有），无法执行命令。请安装 Git for Windows（提供 Git Bash），或把 bash.exe 绝对路径设到环境变量 STEP_SHELL_PATH。',
+      );
+    }
+    const prepared = prepareCommand(input.command, shell, ctx.cwd);
 
     // 后台执行：起进程、注册、立即返回 task_id
     if (input.run_in_background === true) {
@@ -166,7 +178,12 @@ export const bashTool: ToolDef<z.infer<typeof schema>> = {
         return fail('当前上下文不支持后台任务。');
       }
       try {
-        const id = ctx.background.start(input.command, shell.cmd, shell.args(input.command), ctx.cwd);
+        const id = ctx.background.start(
+          input.command,
+          shell.cmd,
+          shell.args(prepared.command),
+          prepared.cwd,
+        );
         return ok(
           `已在后台启动任务 ${id}。任务到达终态时你会自动收到完成通知，不要起了就立刻等待或反复轮询；确需查看时用 task_list 看状态、task_output 看输出、task_stop 终止。`,
         );
@@ -176,6 +193,6 @@ export const bashTool: ToolDef<z.infer<typeof schema>> = {
     }
 
     const timeoutSec = Math.min(input.timeout ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
-    return await runForeground(input.command, shell, ctx, timeoutSec);
+    return await runForeground(prepared.command, shell, prepared.cwd, ctx, timeoutSec);
   },
 };

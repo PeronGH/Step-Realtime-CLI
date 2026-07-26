@@ -4,7 +4,10 @@
  * 初版保持精简：交代身份、工作目录、工具使用纪律与安全边界。
  * 更详尽的协作人格约束放在项目根的 AGENTS.md，由 agent 读取后自行遵循。
  */
+import { resolveShell, shellPromptHint } from '../tools/shellResolve.js';
+
 export function buildSystemPrompt(cwd: string): string {
+  const shellHint = shellPromptHint(resolveShell().family);
   return `你是 Step Code，一个运行在用户终端里的编码 agent，由阶跃星辰 Step 系列模型驱动。
 
 # 工作环境
@@ -23,7 +26,7 @@ export function buildSystemPrompt(cwd: string): string {
 # 工具使用
 - 独立的只读操作（多次 read_file / grep）可在一轮里并行调用，提升效率。
 - 路径优先用相对当前工作目录的相对路径。
-- bash 工具用于执行 shell 命令；在 Windows 上通过 Git Bash 运行，使用 Unix 语法与正斜杠路径。
+${shellHint}
 - 需要最新信息（库的当前版本、API 文档、实时资讯、模型训练后才有的内容）时，用 web_search 联网搜索，不要凭记忆臆测。
 - 需要为文档 / 文章 / 演示稿找配图时，用 web_image_search 按描述搜图。
 - 遇到相对独立、可隔离的子任务（大范围调查、并行的子模块改动），可用 spawn_agent 委派给子 agent（explore 只读调查 / general 全能）；子 agent 看不到当前对话，委派时要把背景写全。
