@@ -31,6 +31,42 @@ function statusMark(status: 'running' | 'ok' | 'error'): { symbol: string; color
 const COLLAPSED_ERROR_LINES = 4;
 const EXPANDED_MAX_LINES = 200;
 
+/** diff 数据行：4 位右对齐行号 + 空格 + 标记（+/-/空格）。用于按行上色。 */
+const DIFF_ROW_RE = /^\s*\d+ ([+\-]) /;
+
+/** 渲染一行工具输出，按 diff 语义上色：+ 绿、- 红、省略/展开提示暗色、diff 摘要头青色，其余常色。 */
+function renderResultLine(line: string, key: number, fallbackColor: string): React.ReactElement {
+  const m = DIFF_ROW_RE.exec(line);
+  if (m !== null) {
+    return (
+      <Text key={key} color={m[1] === '+' ? 'green' : 'red'}>
+        {line}
+      </Text>
+    );
+  }
+  // 省略/截断提示行（以若干空格 + … 开头）
+  if (/^\s*…/.test(line)) {
+    return (
+      <Text key={key} color="gray">
+        {line}
+      </Text>
+    );
+  }
+  // diff 摘要头（+N -M path）
+  if (/^(\+\d+ )?(-\d+ )?\S/.test(line) && /^[+-]\d+ /.test(line)) {
+    return (
+      <Text key={key} color="cyan">
+        {line}
+      </Text>
+    );
+  }
+  return (
+    <Text key={key} color={fallbackColor}>
+      {line}
+    </Text>
+  );
+}
+
 /**
  * 渲染一次工具调用：名称 + 入参摘要 + 状态。
  * 结果体默认折叠——出错时显示前几行预览，成功时只显示「N 行输出 · Ctrl+O 展开」提示；
@@ -99,7 +135,7 @@ function ResultBody({
     const truncated = lines.length > EXPANDED_MAX_LINES;
     return (
       <Box flexDirection="column" marginLeft={2}>
-        <Text color={isError ? 'red' : 'gray'}>{shown.join('\n')}</Text>
+        {shown.map((line, i) => renderResultLine(line, i, isError ? 'red' : 'gray'))}
         {truncated ? (
           <Text color="gray">{t('toolCall.tooLong', { shown: EXPANDED_MAX_LINES, total: lines.length })}</Text>
         ) : null}
@@ -109,12 +145,25 @@ function ResultBody({
 
   // 折叠态
   if (isError) {
-    const preview = lines.slice(0, COLLAPSED_ERROR_LINES).join('\n');
+    const preview = lines.slice(0, COLLAPSED_ERROR_LINES);
     const more = lines.length - COLLAPSED_ERROR_LINES;
     return (
       <Box flexDirection="column" marginLeft={2}>
-        <Text color="red">{preview}</Text>
+        {preview.map((line, i) => renderResultLine(line, i, 'red'))}
         {more > 0 ? <Text color="gray">{t('toolCall.moreLines', { count: more })}</Text> : null}
+      </Box>
+    );
+  }
+  // 成功且含 diff（首行是 +N/-M 摘要）：直接展示 diff 主体，不折叠成一行
+  if (lines.length > 0 && /^[+-]\d+ /.test(lines[0]!)) {
+    const shown = lines.slice(0, EXPANDED_MAX_LINES);
+    const truncated = lines.length > EXPANDED_MAX_LINES;
+    return (
+      <Box flexDirection="column" marginLeft={2}>
+        {shown.map((line, i) => renderResultLine(line, i, 'gray'))}
+        {truncated ? (
+          <Text color="gray">{t('toolCall.tooLong', { shown: EXPANDED_MAX_LINES, total: lines.length })}</Text>
+        ) : null}
       </Box>
     );
   }

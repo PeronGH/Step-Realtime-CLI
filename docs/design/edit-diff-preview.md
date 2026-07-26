@@ -1,6 +1,6 @@
 # Edit 工具 Diff 预览 — 产品设计文档
 
-状态：设计稿
+状态：已实现（路线 A）
 作者：Step Code
 关联：`src/tools/edit.ts`、`src/tui/ToolCall.tsx`
 

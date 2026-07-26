@@ -2,6 +2,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
 import { resolvePath } from './fsutil.js';
 import { fail, ok, type ToolDef } from './types.js';
+import { renderDiffClustered } from '../tui/diffView.js';
+
+/** edit 结果预览的 diff 主体最大行数（折叠上限，超出附「N more changes hidden」）。 */
+const EDIT_DIFF_MAX_LINES = 40;
 
 const schema = z.object({
   path: z.string().describe('要编辑的文件路径。'),
@@ -82,6 +86,12 @@ export const editFileTool: ToolDef<z.infer<typeof schema>> = {
     } catch (e) {
       return fail(`写入失败：${(e as Error).message}`);
     }
-    return ok(`已编辑 ${input.path}（替换 ${occurrences} 处）。`);
+
+    // 生成改动预览：用归一化 LF 文本算 diff（避免 CRLF 的 \r 干扰行分割）。
+    const diffBody = renderDiffClustered(toLF(text), toLF(next), input.path, {
+      maxLines: EDIT_DIFF_MAX_LINES,
+    });
+    const summary = `已编辑 ${input.path}（替换 ${occurrences} 处）。`;
+    return ok(diffBody.length > 1 ? `${summary}\n${diffBody.join('\n')}` : summary);
   },
 };
