@@ -27,7 +27,7 @@ import { AgentGroup } from './AgentGroup.js';
 import { ApprovalPrompt, denyReason, estimateChromeRows as estimateApprovalRows, type ApprovalRequest } from './ApprovalPrompt.js';
 import { QuestionPrompt, estimateChromeRows as estimateQuestionRows } from './QuestionPrompt.js';
 import type { AskUserRequest, QuestionAnswers } from '../tools/askUser.js';
-import { readClipboardImage } from './clipboardImage.js';
+import { readClipboardImage, clipboardToolHint } from './clipboardImage.js';
 import { ImageAttachmentStore, extractImageContent } from './imageAttachment.js';
 import { busyRoute, helpText, parseSlash } from './commands.js';
 import { runPluginCommand } from './pluginCommand.js';
@@ -460,7 +460,9 @@ export function App({
     pushItem({ kind: 'note', text: t('app.image.reading') });
     void readClipboardImage().then((img) => {
       if (img === null) {
-        pushItem({ kind: 'note', text: t('app.image.none') });
+        // 区分「缺平台工具」与「剪贴板没图片」，给不同提示
+        const hint = clipboardToolHint();
+        pushItem({ kind: 'note', text: hint ?? t('app.image.none') });
         return;
       }
       const att = imageStore.current.add(img.base64, img.mediaType, img.width, img.height);
