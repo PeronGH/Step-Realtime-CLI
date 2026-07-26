@@ -59,6 +59,8 @@ export class AnthropicMessagesProvider implements ChatProvider {
     signal?: AbortSignal;
     /** 模型覆盖；省略用构造时的默认模型。 */
     model?: string;
+    /** thinking 覆盖（三态）：undefined 用构造默认；对象本次覆盖；null 本次强制不发 thinking 字段。 */
+    thinking?: { budgetTokens?: number } | null;
   }): ReturnType<Anthropic['messages']['stream']> {
     const body: Anthropic.MessageStreamParams = {
       model: params.model ?? this.model,
@@ -67,13 +69,15 @@ export class AnthropicMessagesProvider implements ChatProvider {
       tools: withToolCacheControl(params.tools),
       messages: prepareMessages(params.messages),
     };
-    // sendThinking 为 true 且配置了 [thinking] 时才带 thinking 字段（budget 未配只带 enabled）；
-    // 其余情况绝不带，也绝不发 {type:'disabled'}（实测被忽略，发了是撒谎）。
-    if (this.sendThinking && this.thinking !== undefined) {
+    // thinking 三态：undefined 跟随构造默认（[thinking] 配置），对象本次覆盖（/think 选档），
+    // null 本次抑制（/think off）。sendThinking 为 true 且最终值非 null/undefined 时才带 thinking
+    // 字段（budget 未配只带 enabled）；其余情况绝不带，也绝不发 {type:'disabled'}（实测被忽略，发了是撒谎）。
+    const thinking = params.thinking === undefined ? this.thinking : params.thinking;
+    if (this.sendThinking && thinking !== null && thinking !== undefined) {
       // SDK 类型把 budget_tokens 标为必填，但 StepFun 实测接受仅 {type:'enabled'}（服务端默认预算），故做断言
       body.thinking = (
-        this.thinking.budgetTokens !== undefined
-          ? { type: 'enabled', budget_tokens: this.thinking.budgetTokens }
+        thinking.budgetTokens !== undefined
+          ? { type: 'enabled', budget_tokens: thinking.budgetTokens }
           : { type: 'enabled' }
       ) as Anthropic.ThinkingConfigParam;
     }

@@ -50,13 +50,18 @@ export interface BackgroundConfig {
  * thinking（推理过程）请求配置（[thinking] 段）。
  * enabled 默认 false：不主动发 thinking 字段，保持既有请求行为（部分服务端对该字段 400）；
  * budget_tokens 可选，Anthropic 协议要求 ≥1024 且 < max_tokens。
- * 不引入 effort 档位概念（StepFun 侧只认 budget_tokens 形态），类型上预留扩展位。
+ * 思考深度档位（levels + default_level）是数据不是代码：档位名 → budget 的映射放 config，
+ * 会话级 /think 切换在此表内选档；未配置 [thinking.levels] 时用 {@link DEFAULT_THINKING_LEVELS}。
  */
 export interface ThinkingConfig {
   /** 是否主动发送 thinking 请求字段（budget 控制手段；思考本身是服务端固有行为，渲染不受影响）。 */
   enabled: boolean;
   /** 思考预算 token 数（clamp ≥1024）；未配置时请求只带 {type:'enabled'}。 */
   budgetTokens?: number;
+  /** 思考深度档位表（档位名 → budget token 数，单个档位 clamp ≥1024）。恒非空（缺省落内置默认表）。 */
+  levels: Record<string, number>;
+  /** 默认档位名（[thinking] default_level）；必须命中 levels 内的档位，否则 loadConfig 报配置错误。 */
+  defaultLevel?: string;
 }
 
 /**
@@ -141,8 +146,10 @@ export interface StepCodeConfig {
   language?: Locale;
   /** AGENTS.md 自定义加载路径（config.toml agents_paths）。配置后完全覆盖默认的用户级+项目级收集；文件直读、目录取 AGENTS.md / agents.md。支持 `~` 与相对 cwd 的路径。 */
   agentsPaths?: string[];
-  /** skills 追加扫描目录（config.toml extra_skill_dirs，对齐 某竞品 同名概念）。追加在默认三路径之后、plugin 之前扫描，同名 skill 追加目录胜出。支持 `~` 与相对 cwd 的路径。 */
+  /** skills 追加扫描目录（config.toml extra_skill_dirs，对齐 某竞品 同名概念）。追加在默认路径之后、plugin 之前扫描，同名 skill 追加目录胜出。支持 `~` 与相对 cwd 的路径。 */
   extraSkillDirs?: string[];
+  /** 按名排除的 skill 清单（config.toml disabled_skills）。合并完成后统一过滤，任何来源的同名 skill 都不加载；用于屏蔽不归你管的目录（团队共享 .agents/skills 等）里的个别 skill。 */
+  disabledSkills?: string[];
   /** [models.<别名>] 模型别名表（渠道与模型分离）。未配置或全部无效时键不进结果对象。 */
   models?: Record<string, ModelEntry>;
   /** [providers.<id>] 渠道表（自定义服务商端点/密钥）。未配置或全部无效时键不进结果对象。 */
@@ -228,6 +235,12 @@ const THINKING_BUDGET_MIN = 1024;
 const THINKING_TEXT_MARGIN = 2048;
 
 /**
+ * 内置默认思考深度档位表（[thinking.levels] 未配置或全部无效时使用）。
+ * 取 某竞品CLI 实战值；用户可在 config.toml 用 [thinking.levels] 整体覆盖（档位是数据不是代码）。
+ */
+export const DEFAULT_THINKING_LEVELS: Record<string, number> = { low: 1024, medium: 4096, high: 32000 };
+
+/**
  * 从 cwd 下的 .env 文件读取键值（若存在），只填充尚未在 process.env 中的键。
  * 不引入 dotenv 依赖，保持极简；只解析 `KEY=VALUE` 形式，忽略注释与空行。
  */
@@ -269,6 +282,7 @@ interface TomlConfigShape {
   language?: unknown;
   agents_paths?: unknown;
   extra_skill_dirs?: unknown;
+  disabled_skills?: unknown;
   models?: unknown;
   providers?: unknown;
   hooks?: unknown;
@@ -399,17 +413,41 @@ export function resolveBackgroundConfig(raw: unknown): BackgroundConfig {
 }
 
 /**
+ * 解析 [thinking.levels] 档位表。纯函数。
+ * raw 非对象 → undefined；档位名空串或值非有限数字 → 跳过该档；合法值取整并 clamp ≥1024。
+ * 没有任何有效档位时返回 undefined（调用方回落 {@link DEFAULT_THINKING_LEVELS}）。
+ */
+function parseThinkingLevels(raw: unknown): Record<string, number> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (name === '') continue;
+    const budget = asNumber(value);
+    if (budget === undefined) continue;
+    out[name] = Math.max(THINKING_BUDGET_MIN, Math.round(budget));
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * 从 [thinking] 段解析 thinking 请求配置。纯函数，便于单测。
  * enabled 缺省 false（非布尔按 false）；budget_tokens 非法时键不进结果对象，
- * 合法时取整并 clamp 到 ≥1024。启用且配了 budget 时校验正文最小余量
- * maxTokens - budgetTokens ≥ 2048，不满足抛配置错误并给出调整方向。
+ * 合法时取整并 clamp 到 ≥1024。levels 未配置或全部无效时回落内置默认表
+ * （{@link DEFAULT_THINKING_LEVELS}）；default_level 必须命中最终档位表，否则抛配置错误。
+ * 启用且配了 budget 时校验正文最小余量 maxTokens - budget ≥ 2048，不满足抛配置错误
+ * 并给出调整方向；用户自定义 levels 在启用时逐档套用同一余量校验（内置默认表不校验——
+ * 它是兜底数据，运行时档位由用户经 /think 显式选择）。
  * @param raw config.toml 里 [thinking] 段的原始值（可能为 undefined / 非对象）。
  * @param maxTokens 最终生效的 max_tokens（余量校验基准）。
- * @throws 启用时 budget 未给正文留出最小余量。
+ * @throws 启用时 budget/自定义档位未给正文留出最小余量；default_level 引用不存在的档位。
  */
 export function resolveThinkingConfig(raw: unknown, maxTokens: number): ThinkingConfig {
   const t = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
-  const cfg: ThinkingConfig = { enabled: t['enabled'] === true };
+  const userLevels = parseThinkingLevels(t['levels']);
+  const cfg: ThinkingConfig = {
+    enabled: t['enabled'] === true,
+    levels: userLevels ?? { ...DEFAULT_THINKING_LEVELS },
+  };
   const budget = asNumber(t['budget_tokens']);
   if (budget !== undefined) {
     cfg.budgetTokens = Math.max(THINKING_BUDGET_MIN, Math.round(budget));
@@ -419,6 +457,26 @@ export function resolveThinkingConfig(raw: unknown, maxTokens: number): Thinking
       `[thinking] budget_tokens=${cfg.budgetTokens} 未给正文留出最小余量：max_tokens(${maxTokens}) - budget_tokens(${cfg.budgetTokens}) < ${THINKING_TEXT_MARGIN}。` +
         `请调大 max_tokens 或调小 budget_tokens（思考会消耗 max_tokens，余量不足时正文可能零输出）。`,
     );
+  }
+  // 用户自定义档位沿用同一余量校验（仅启用时；未启用就不发字段，与 budget_tokens 的既有口径一致）
+  if (cfg.enabled && userLevels !== undefined) {
+    for (const [name, levelBudget] of Object.entries(userLevels)) {
+      if (maxTokens - levelBudget < THINKING_TEXT_MARGIN) {
+        throw new Error(
+          `[thinking.levels] 档位 ${name}=${levelBudget} 未给正文留出最小余量：max_tokens(${maxTokens}) - ${name}(${levelBudget}) < ${THINKING_TEXT_MARGIN}。` +
+            `请调大 max_tokens 或调小该档位的 budget（思考会消耗 max_tokens，余量不足时正文可能零输出）。`,
+        );
+      }
+    }
+  }
+  const defaultLevel = asString(t['default_level']);
+  if (defaultLevel !== undefined) {
+    if (cfg.levels[defaultLevel] === undefined) {
+      throw new Error(
+        `[thinking] default_level="${defaultLevel}" 未命中任何档位（可用：${Object.keys(cfg.levels).join(' | ')}）。`,
+      );
+    }
+    cfg.defaultLevel = defaultLevel;
   }
   return cfg;
 }
@@ -644,6 +702,8 @@ export function loadConfig(cwd: string = process.cwd(), overrides: ConfigOverrid
   if (agentsPaths !== undefined) cfg.agentsPaths = agentsPaths;
   const extraSkillDirs = resolveStringArray(toml.extra_skill_dirs);
   if (extraSkillDirs !== undefined) cfg.extraSkillDirs = extraSkillDirs;
+  const disabledSkills = resolveStringArray(toml.disabled_skills);
+  if (disabledSkills !== undefined) cfg.disabledSkills = disabledSkills;
   // 模型别名表：未配置或全部无效时键不进结果对象（下游 toEqual 精确断言依赖此形态）
   const models = resolveModels(toml.models);
   if (models !== undefined) cfg.models = models;

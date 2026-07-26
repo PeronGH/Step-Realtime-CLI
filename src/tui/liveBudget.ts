@@ -96,6 +96,12 @@ export function displayWidth(text: string): number {
   return width;
 }
 
+/** 一条逻辑行在终端内折行后的行数（宽字符按 2 列）；宽度未知时退化为 1 行。弹层行数估算统一入口。 */
+export function wrappedRows(text: string, width: number | undefined): number {
+  if (width === undefined || width <= 0) return 1;
+  return Math.max(1, Math.ceil(displayWidth(text) / width));
+}
+
 /**
  * STEP_DEBUG_RENDER=1 时输出动态帧预算诊断。
  * 只在触线（总高 ≥ rows，标 DANGER）或触发过降级（标 DEGRADED）时写

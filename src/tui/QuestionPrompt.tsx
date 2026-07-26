@@ -3,14 +3,34 @@ import TextInput from 'ink-text-input';
 import { useRef, useState } from 'react';
 import type { AskUserRequest, QuestionAnswers } from '../tools/askUser.js';
 import { t } from '../i18n.js';
+import { wrappedRows } from './liveBudget.js';
 
 /**
  * 估算提问框渲染行数（供 App 计算动态区高度预算，滚动跳顶修复）。
- * 结构实测：marginTop 1 + 边框 2 + 题干 1 + 选项 N（取各题最多选项数）+ Other 1 + 提示 1。
+ * 结构：marginTop 1 + 边框 2 + 题干（折行）+ 选项（逐条折行）+ Other 1 + 提示（折行）。
+ * 多题时取各题行数最大值——qIdx 是组件内部状态，换题时 App 不会重算预算，预算必须覆盖最高的一题。
+ * termCols 用于精确计算长题干/长选项描述的折行（内宽 = 列数 − 边框 2 − paddingX 2）；
+ * 缺省时退化为每逻辑行 1 行的结构估算（测试/非 TTY 场景）。
  */
-export function estimateChromeRows(req: AskUserRequest): number {
-  const maxOptions = Math.max(0, ...req.questions.map((q) => q.options.length));
-  return 1 + 2 + 1 + maxOptions + 1 + 1;
+export function estimateChromeRows(req: AskUserRequest, termCols?: number): number {
+  const innerWidth = termCols === undefined ? undefined : termCols - 4;
+  let maxBody = 0;
+  for (const q of req.questions) {
+    const counter = req.questions.length > 1 ? t('question.counter', { index: 1, total: req.questions.length }) : '';
+    const header = q.header !== undefined && q.header !== '' ? `[${q.header}] ` : '';
+    const multi = q.multi_select === true ? t('question.multiHint') : '';
+    let rows = wrappedRows(counter + header + q.question + multi, innerWidth);
+    q.options.forEach((opt, i) => {
+      const box = q.multi_select === true ? '[✓] ' : '';
+      const desc = opt.description !== undefined && opt.description !== '' ? `  — ${opt.description}` : '';
+      // 前缀宽 = 光标列 2 + 勾选列 + [n] 列；取选中态前缀（与未选中同宽，✓/空格同宽）
+      rows += wrappedRows(`→ ${box}[${i + 1}] ${opt.label}${desc}`, innerWidth);
+    });
+    rows += 1; // Other 行（otherMode 下 TextInput 短输入仍 1 行）
+    rows += wrappedRows(t('question.hint'), innerWidth);
+    if (rows > maxBody) maxBody = rows;
+  }
+  return 1 + 2 + maxBody;
 }
 
 /**

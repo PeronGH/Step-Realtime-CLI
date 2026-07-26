@@ -2,8 +2,14 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import { PromptInput } from '../../src/tui/PromptInput.js';
+import { SLASH_COMMANDS } from '../../src/tui/commands.js';
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// 命令总数与位置一律从 SLASH_COMMANDS 派生——新增命令（如 /think）不再顶爆硬编码序号
+const TOTAL = SLASH_COMMANDS.length;
+const CMD = (i: number): string => `/${SLASH_COMMANDS[i]!.name}`;
+const IND = (n: number): string => `(${n}/${TOTAL})`;
 
 describe('PromptInput 斜杠命令补全', () => {
   it('输入 / 显示命令下拉', () => {
@@ -11,8 +17,8 @@ describe('PromptInput 斜杠命令补全', () => {
       React.createElement(PromptInput, { value: '/', onChange: () => {}, onSubmit: () => {}, busy: false }),
     );
     const out = lastFrame() ?? '';
-    expect(out).toContain('/help');
-    expect(out).toContain('/plan');
+    expect(out).toContain(CMD(0)); // /help
+    expect(out).toContain(CMD(2)); // 第 3 条在初始窗口内
   });
 
   it('输入 /pl 过滤出相关命令', () => {
@@ -83,7 +89,7 @@ describe('PromptInput 斜杠命令补全', () => {
 });
 
 describe('PromptInput 斜杠菜单窗口滚动', () => {
-  // SLASH_COMMANDS 共 21 条，窗口 6 条：初始窗口为 help..plan（前 6 条）
+  // SLASH_COMMANDS 窗口 6 条：初始窗口为前 6 条（help..第 6 条）
   const pressDown = async (stdin: { write: (s: string) => void }, n: number): Promise<void> => {
     for (let i = 0; i < n; i += 1) {
       stdin.write('\x1B[B'); // ↓
@@ -96,28 +102,28 @@ describe('PromptInput 斜杠菜单窗口滚动', () => {
       React.createElement(PromptInput, { value: '/', onChange: () => {}, onSubmit: () => {}, busy: false }),
     );
     await delay(20);
-    // 初始：首条选中，窗口显示前 6 条，指示 (1/21)
+    // 初始：首条选中，窗口显示前 6 条
     let out = lastFrame() ?? '';
-    expect(out).toContain('/help');
-    expect(out).not.toContain('/provider'); // 第 7 条未进窗口
-    expect(out).toContain('(1/21)');
+    expect(out).toContain(CMD(0));
+    expect(out).not.toContain(CMD(6)); // 第 7 条未进窗口
+    expect(out).toContain(IND(1));
 
-    await pressDown(stdin, 4); // → 第 5 条 /auto
+    await pressDown(stdin, 4); // → 第 5 条
     out = lastFrame() ?? '';
-    expect(out).toContain('(5/21)');
-    expect(out).not.toContain('/help'); // 首条滚出窗口
-    expect(out).toContain('/provider'); // 第 7 条滚入窗口
+    expect(out).toContain(IND(5));
+    expect(out).not.toContain(CMD(0)); // 首条滚出窗口
+    expect(out).toContain(CMD(6)); // 第 7 条滚入窗口
 
-    await pressDown(stdin, 1); // → 第 6 条 /plan
+    await pressDown(stdin, 1); // → 第 6 条
     out = lastFrame() ?? '';
-    expect(out).toContain('(6/21)');
-    expect(out).toContain('/goal'); // 第 8 条滚入窗口
+    expect(out).toContain(IND(6));
+    expect(out).toContain(CMD(7)); // 第 8 条滚入窗口
 
-    await pressDown(stdin, 1); // → 第 7 条 /provider
+    await pressDown(stdin, 1); // → 第 7 条
     out = lastFrame() ?? '';
-    expect(out).toContain('(7/21)');
-    expect(out).toContain('/provider');
-    expect(out).not.toContain('/model'); // 第 2 条也滚出窗口
+    expect(out).toContain(IND(7));
+    expect(out).toContain(CMD(6));
+    expect(out).not.toContain(CMD(1)); // 第 2 条也滚出窗口
   });
 
   it('↓ 到底再 ↓ 回卷首条，窗口甩回顶部', async () => {
@@ -125,18 +131,18 @@ describe('PromptInput 斜杠菜单窗口滚动', () => {
       React.createElement(PromptInput, { value: '/', onChange: () => {}, onSubmit: () => {}, busy: false }),
     );
     await delay(20);
-    await pressDown(stdin, 20); // → 末条 /exit
+    await pressDown(stdin, TOTAL - 1); // → 末条
     let out = lastFrame() ?? '';
-    expect(out).toContain('(21/21)');
-    expect(out).toContain('/exit');
-    expect(out).not.toContain('/help');
+    expect(out).toContain(IND(TOTAL));
+    expect(out).toContain(CMD(TOTAL - 1));
+    expect(out).not.toContain(CMD(0));
 
     await pressDown(stdin, 1); // 回卷到首条
     out = lastFrame() ?? '';
-    expect(out).toContain('(1/21)');
-    expect(out).toContain('/help');
-    expect(out).not.toContain('/exit');
-    // 21 次按键 × 20ms 延迟在套件高负载下会逼近默认 5s 超时，放宽到 15s
+    expect(out).toContain(IND(1));
+    expect(out).toContain(CMD(0));
+    expect(out).not.toContain(CMD(TOTAL - 1));
+    // 按键次数 × 20ms 延迟在套件高负载下会逼近默认 5s 超时，放宽到 15s
   }, 15_000);
 
   it('↑ 到顶再 ↑ 回卷末条，窗口甩到底部', async () => {
@@ -147,9 +153,9 @@ describe('PromptInput 斜杠菜单窗口滚动', () => {
     stdin.write('\x1B[A'); // ↑ → 回卷到末条
     await delay(20);
     const out = lastFrame() ?? '';
-    expect(out).toContain('(21/21)');
-    expect(out).toContain('/exit');
-    expect(out).not.toContain('/help');
+    expect(out).toContain(IND(TOTAL));
+    expect(out).toContain(CMD(TOTAL - 1));
+    expect(out).not.toContain(CMD(0));
   });
 
   it('匹配总数 ≤ 窗口时不显示滚动指示', async () => {
@@ -282,13 +288,13 @@ describe('PromptInput 按键导航与编辑（自研输入组件）', () => {
     await delay(30);
     stdin.write('\x1B[B');
     await delay(30);
-    expect(lastFrame() ?? '').toContain('(3/21)');
+    expect(lastFrame() ?? '').toContain(IND(3));
     await type(stdin, '\x1b[H'); // Home：归输入框光标，不动菜单
     await type(stdin, '\x1b[8~'); // End：同样不动菜单
-    expect(lastFrame() ?? '').toContain('(3/21)');
+    expect(lastFrame() ?? '').toContain(IND(3));
     stdin.write('\x1B[B'); // ↓ 继续从第 3 条往后走
     await delay(30);
-    expect(lastFrame() ?? '').toContain('(4/21)');
+    expect(lastFrame() ?? '').toContain(IND(4));
   });
 
   it('历史回溯后编辑键生效：Up 取历史 → Home → 行首插入', async () => {

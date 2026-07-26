@@ -36,9 +36,15 @@ describe('countSettledItems 定稿判定', () => {
     expect(countSettledItems(items, true)).toBe(1);
   });
 
-  it('busy 时最后一条 assistant 后面即使跟了工具也仍留动态区（transient 高亮态未完成）', () => {
+  it('busy 时 assistant 后面跟了条目即定稿（text 只往末尾追加，旧条不可能再增长）', () => {
     const items = [user('u1'), assistant('a1'), tool('t1', 'ok')];
-    expect(countSettledItems(items, true)).toBe(1);
+    expect(countSettledItems(items, true)).toBe(3);
+  });
+
+  it('busy 时正文流完进入工具执行期：assistant 随前缀定稿，仅 running 工具留动态区', () => {
+    // 长正文不再被窗口化压整轮，「已隐藏 N 行」在 tool_start 到来时即释放
+    const items = [user('u1'), assistant('长正文'), tool('t1', 'running')];
+    expect(countSettledItems(items, true)).toBe(2);
   });
 
   it('busy 时 running 工具及其后的条目全部留动态区', () => {

@@ -2,11 +2,14 @@ import type Anthropic from '@anthropic-ai/sdk';
 import {
   abortableSleep,
   computeRetryDelay,
+  EmptyResponseError,
   errorAdvice,
   isContextOverflowError,
+  isEmptyStreamError,
   isRateLimitError,
   isRetryableError,
   retryAfterMs,
+  summarizeError,
   RETRY_MAX_ATTEMPTS,
 } from '../provider/retry.js';
 import type { ChatProvider } from '../provider/types.js';
@@ -43,6 +46,8 @@ export interface RunTurnOptions {
   allowedTools?: Set<string>;
   /** 模型覆盖，透传给 provider.stream。 */
   model?: string;
+  /** thinking 覆盖（三态：undefined 构造默认 / 对象覆盖 / null 抑制），透传给 provider.stream。 */
+  thinking?: { budgetTokens?: number } | null;
 }
 
 /** 用户主动取消时回灌给模型的 tool_result 文案（区别于系统错误，避免模型自动重试）。 */
@@ -66,11 +71,20 @@ export function subagentRequeueDelay(
   return retryAfterMs(result.cause) ?? SUBAGENT_REQUEUE_DELAYS[Math.min(requeued, SUBAGENT_REQUEUE_DELAYS.length - 1)]!;
 }
 
-/** 错误事件文案：message + 按错误码附加的建议用户动作（最小目录：401/403、429 耗尽）。 */
+/** 错误事件文案：可读摘要（HTTP 状态码 + 服务端错误类型/消息）+ 按错误码附加的建议用户动作。 */
 function errorMessageWithAdvice(err: unknown): string {
   const advice = errorAdvice(err);
-  const message = (err as Error).message;
+  // 空流/空响应给确定的中文文案：SDK 原文是英文且不附恢复线索
+  const message =
+    err instanceof EmptyResponseError || isEmptyStreamError(err)
+      ? t('error.emptyStream')
+      : summarizeError(err);
   return advice === undefined ? message : `${message}\n${advice}`;
+}
+
+/** 空响应判定：content 里既没有 text 块也没有 tool_use 块（thinking-only 视为空——思考不构成正文）。 */
+function isEmptyResponse(msg: Anthropic.Message): boolean {
+  return !msg.content.some((b) => b.type === 'text' || b.type === 'tool_use');
 }
 
 /** 准备阶段产出的一个待执行工具调用。 */
@@ -96,7 +110,7 @@ interface PreparedToolCall {
 export async function* runTurn(
   opts: RunTurnOptions,
 ): AsyncGenerator<AgentEvent, TurnOutcome> {
-  const { provider, system, tools, ctx, messages, hooks, signal, allowedTools, model } = opts;
+  const { provider, system, tools, ctx, messages, hooks, signal, allowedTools, model, thinking } = opts;
 
   if (signal?.aborted) return { stopReason: 'aborted' };
 
@@ -106,7 +120,7 @@ export async function* runTurn(
     let emittedText = false;
     try {
       const wireOpts = ctx.attachments !== undefined ? { attachments: ctx.attachments, cwd: ctx.cwd } : undefined;
-      const stream = provider.stream({ system, tools, messages: toWire(messages, wireOpts), signal, model });
+      const stream = provider.stream({ system, tools, messages: toWire(messages, wireOpts), signal, model, thinking });
       for await (const event of stream) {
         if (signal?.aborted) break;
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -121,7 +135,13 @@ export async function* runTurn(
         // 随 assistant 消息进历史并原样回灌（Anthropic 协议要求 tool-use 轮带 signature）。
       }
       if (signal?.aborted) return { stopReason: 'aborted' };
-      final = await stream.finalMessage();
+      const msg = await stream.finalMessage();
+      // 空响应契约：流正常结束但无正文也无工具调用，与 SDK 空流错误同族——
+      // 抛进下方 catch 统一走重试。emittedText 守卫仍优先：已流出思考时不重试，避免重复展示。
+      if (isEmptyResponse(msg)) {
+        throw new EmptyResponseError('empty response (no text, no tool_use)');
+      }
+      final = msg;
       break;
     } catch (e) {
       if (signal?.aborted) return { stopReason: 'aborted' };

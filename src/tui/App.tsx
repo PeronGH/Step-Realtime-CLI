@@ -6,6 +6,7 @@ import { runReflect } from '../agent/reflect.js';
 import type { LoopHooks } from '../agent/hooks.js';
 import { composeLoopHooks, type HookEngine } from '../agent/hooks/engine.js';
 import { stored, type StoredMessage } from '../agent/message.js';
+import { historyToDisplayItems } from './historyReplay.js';
 import { decide, planModeDenyReason, type PermissionMode } from '../agent/permission/mode.js';
 import { BackgroundManager, type BackgroundTask } from '../agent/background/manager.js';
 import { decideNotifyRoute, formatSettleNotification } from '../agent/background/notify.js';
@@ -13,7 +14,7 @@ import { GoalMode, type GoalState } from '../agent/goal/mode.js';
 import { CronScheduler } from '../agent/cron/scheduler.js';
 import { CronJobStore } from '../agent/cron/store.js';
 import { createSubagentRunner } from '../agent/subagent/runner.js';
-import { renderSkillActivation } from '../skill/registry.js';
+import { renderSkillActivation, skillListing, type SkillRegistry, type SkillRegistryDiff } from '../skill/registry.js';
 import type { CompactionConfig, StepCodeConfig, SubagentLimits } from '../config/config.js';
 import { PROVIDER_PRESETS, resolveModelEntry, saveLanguage } from '../config/config.js';
 import { getLocale, setLocale, t, type Locale } from '../i18n.js';
@@ -34,9 +35,18 @@ import { formatMcpStatus } from '../mcp/status.js';
 import type { McpManager } from '../mcp/manager.js';
 import { formatElapsed } from './elapsed.js';
 import { STATUS_BAR_ROWS } from './LiveViewport.js';
-import { computeLiveBudget, logRenderBudget } from './liveBudget.js';
+import { computeLiveBudget, logRenderBudget, displayWidth, wrappedRows } from './liveBudget.js';
 import { MessageItem, MessageList, ThinkingPreview, THINKING_PREVIEW_LINES, countSettledItems } from './MessageList.js';
 import { ModelPicker, type ModelPickerItem } from './ModelPicker.js';
+import { ThinkPicker, type ThinkPickerItem } from './ThinkPicker.js';
+import {
+  parseThinkArgs,
+  thinkLevelsOf,
+  thinkStatusLabel,
+  thinkStreamParam,
+  thinkingAvailable,
+  type ThinkOverride,
+} from './thinkCommand.js';
 import { PromptInput, computePromptRows } from './PromptInput.js';
 import { QueuePreview } from './QueuePreview.js';
 import { computeBacktrack, truncateItemsAtLastUser } from './backtrack.js';
@@ -58,7 +68,14 @@ interface PendingPlan {
 
 export interface AppProps {
   provider: ChatProvider;
-  system: string;
+  /** system prompt 静态前缀（buildSystemPrompt 产出）；skill 清单与 AGENTS.md 由 App 按当前注册表逐轮组合。 */
+  systemPrefix: string;
+  /** AGENTS.md 汇总内容（空串 = 无，组合时省略）。 */
+  agentsMd: string;
+  /** 当前 skill 注册表持有者：/skill reload 或 turn 边界指纹检测后整体换引用。 */
+  skillsRef: { current: SkillRegistry };
+  /** 重扫 skill 目录：force=false 且指纹未变时返回 null（零成本），否则全量重建并返回 diff。 */
+  reloadSkills: (force?: boolean) => SkillRegistryDiff | null;
   ctx: ToolContext;
   model: string;
   /** 完整配置快照，供运行时 /provider 重建 provider 实例。 */
@@ -81,7 +98,10 @@ export interface AppProps {
 
 export function App({
   provider,
-  system,
+  systemPrefix,
+  agentsMd,
+  skillsRef,
+  reloadSkills,
   ctx,
   model: initialModel,
   config,
@@ -99,11 +119,29 @@ export function App({
   const { exit } = useApp();
   const { stdout } = useStdout();
   const resumed = session.messages.length > 0;
-  const [items, setItems] = useState<DisplayItem[]>(
-    resumed
-      ? [{ kind: 'note', text: t('app.resumed', { id: session.id, count: session.messages.length }) }]
-      : [],
-  );
+  const [items, setItems] = useState<DisplayItem[]>(() => {
+    if (!resumed) return [];
+    const replay = historyToDisplayItems(session.messages);
+    const tail: DisplayItem[] = [];
+    if (replay.foldedTurns > 0) {
+      tail.push({
+        kind: 'note',
+        text: t('app.replay.folded', { folded: replay.foldedTurns, total: replay.totalTurns }),
+      });
+    }
+    tail.push({
+      kind: 'note',
+      text: t('app.resumed', {
+        id: session.id,
+        turns: replay.totalTurns,
+        count: session.messages.length,
+      }),
+    });
+    // 折叠提示放在历史内容之前（顶部），恢复 note 放在最末（贴近输入框）。
+    return replay.foldedTurns > 0
+      ? [tail[0]!, ...replay.items, tail[1]!]
+      : [...replay.items, tail[0]!];
+  });
   const [input, setInput] = useState('');
   const [model, setModel] = useState(initialModel);
   // 状态栏模型显示名：当前模型命中带 displayName 的别名时用 displayName，否则用真实 id。
@@ -117,6 +155,11 @@ export function App({
   });
   // /model 无参唤起的交互式模型选择器（替换输入区，对齐提问/审批弹层的挂载模式）。
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  // /think 无参唤起的交互式思考深度选择器（同 ModelPicker 弹层挂载模式）。
+  const [thinkPickerOpen, setThinkPickerOpen] = useState(false);
+  // 会话级思考深度覆盖：undefined = 跟随 config 默认；'off' = 本会话不发 thinking 字段；
+  // 其余 = 档位名（budget 取 config.thinking.levels）。与模型覆盖解耦：/model 切换不重置它。
+  const [thinkOverride, setThinkOverride] = useState<ThinkOverride | undefined>(undefined);
   // 上下文窗口大小做成 state：/model 切别名时跟随别名的 maxContextSize（压缩判定与状态栏共用）。
   const [maxContextSize, setMaxContextSize] = useState(initialMaxContextSize);
   const [busy, setBusy] = useState(false);
@@ -137,6 +180,8 @@ export function App({
   const busyRef = useRef(false);
   // 运行时 provider 实例：/provider 切换时用 createProvider 重建并替换 current。
   const providerRef = useRef<ChatProvider>(provider);
+  // 当前生效渠道名（预设名或自定义渠道的 type）：/provider、/model 别名切换时同步，/think 门控据此判定。
+  const providerNameRef = useRef(config.provider);
   const modeRef = useRef(initialMode);
   const planModeRef = useRef(false);
   const history = useRef<StoredMessage[]>(session.messages.slice());
@@ -278,6 +323,26 @@ export function App({
   const pushItem = useCallback((item: DisplayItem) => {
     setItems((prev) => [...prev, item]);
   }, []);
+
+  // 同名 skill 冲突提示文本：哪个来源被采用、覆盖了谁（无冲突返回 null）
+  const skillConflictNote = useCallback((): string | null => {
+    const conflicts = skillsRef.current.conflicts ?? [];
+    if (conflicts.length === 0) return null;
+    const lines = conflicts.map((c) =>
+      t('app.skill.conflict.line', {
+        name: c.name,
+        winner: c.winner.dir,
+        losers: c.overridden.map((o) => o.dir).join('、'),
+      }),
+    );
+    return `${t('app.skill.conflict.header', { count: conflicts.length })}\n${lines.join('\n')}`;
+  }, [skillsRef]);
+
+  // 启动时报告一次同名 skill 冲突（之后由 reload 路径在冲突变化时再报）
+  useEffect(() => {
+    const note = skillConflictNote();
+    if (note !== null) pushItem({ kind: 'note', text: note });
+  }, [skillConflictNote, pushItem]);
 
   // SessionStart hook：会话创建/恢复后触发一次，stdout 注入会话上下文（拼进后续 runAgent 的 system 尾部）；
   // hook 执行可见性 notice 挂到转录区 note 条目
@@ -500,6 +565,10 @@ export function App({
     }
     // 模型选择器打开时：全部按键交给 ModelPicker 自身的 useInput 处理（↑↓/过滤/Enter/Esc），App 不插手
     if (modelPickerOpen) {
+      return;
+    }
+    // 思考深度选择器打开时：全部按键交给 ThinkPicker 自身的 useInput 处理（↑↓/Enter/Esc），App 不插手
+    if (thinkPickerOpen) {
       return;
     }
     // 计划确认框优先（Ready to code?）
@@ -744,10 +813,35 @@ export function App({
         pushItem({ kind: 'error', text: t('app.model.switchFailed', { message: (e as Error).message }) });
         return;
       }
+      providerNameRef.current = resolved.provider;
       setModel(resolved.model);
       setModelLabel(config.models?.[arg]?.displayName ?? resolved.model);
       setMaxContextSize(resolved.maxContextSize);
       pushItem({ kind: 'note', text: t('app.model.aliasSwitched', { name: arg, model: resolved.model }) });
+    },
+    [config, pushItem],
+  );
+
+  /**
+   * 会话级思考深度切换（/think <档位|off> 文本直切与 ThinkPicker Enter 确认共用此路径）：
+   * 即时生效（下一轮请求经 runAgent 的 thinking 参数透传），不重建会话、不动 provider；
+   * 会话已有历史时追加 prompt cache 失效提示（对齐 /model 的措辞意图）。
+   * name 必为合法档位名或 'off'（文本路径已经 parseThinkArgs 校验，弹层由 items 装配保证）。
+   */
+  const applyThinkLevel = useCallback(
+    (name: string): void => {
+      setThinkOverride(name);
+      const levels = thinkLevelsOf(config.thinking);
+      pushItem({
+        kind: 'note',
+        text: t('app.think.switched', {
+          level: name,
+          detail: name === 'off' ? t('thinkPicker.offDetail') : t('thinkPicker.budget', { budget: levels[name] ?? 0 }),
+        }),
+      });
+      if (history.current.length > 0) {
+        pushItem({ kind: 'note', text: t('app.think.cacheWarning') });
+      }
     },
     [config, pushItem],
   );
@@ -780,6 +874,49 @@ export function App({
             break;
           }
           applyModelAlias(arg);
+          break;
+        }
+        case 'think': {
+          const levels = thinkLevelsOf(config.thinking);
+          // 门控：非 anthropic 协议或未允许发送 thinking 字段时不可用（只提示，不切换）
+          if (!thinkingAvailable(providerNameRef.current, config.thinking)) {
+            pushItem({ kind: 'note', text: t('app.think.unavailable') });
+            break;
+          }
+          const result = parseThinkArgs(args, levels);
+          if (result.kind === 'invalid') {
+            pushItem({
+              kind: 'note',
+              text: t('app.think.invalid', { name: result.name, list: [...Object.keys(levels), 'off'].join(' / ') }),
+            });
+            break;
+          }
+          if (result.kind === 'set') {
+            applyThinkLevel(result.override);
+            break;
+          }
+          // 无参：busy 中退化为文本展示（只读，busy 时经 busyRoute 即时分发到此处）；空闲唤起选择器
+          if (busyRef.current) {
+            const current =
+              thinkOverride === 'off'
+                ? 'off'
+                : thinkOverride !== undefined
+                  ? `${thinkOverride} (${t('thinkPicker.budget', { budget: levels[thinkOverride] ?? 0 })})`
+                  : t('app.think.followDefault');
+            const lines = Object.entries(levels)
+              .map(([n, b]) => t('app.think.levelLine', { name: n, budget: b }))
+              .join('\n');
+            pushItem({
+              kind: 'note',
+              text: t('app.think.status', {
+                current,
+                defaultLevel: config.thinking?.defaultLevel ?? t('app.think.noDefault'),
+                lines,
+              }),
+            });
+            break;
+          }
+          setThinkPickerOpen(true);
           break;
         }
         case 'lang': {
@@ -832,6 +969,7 @@ export function App({
             pushItem({ kind: 'error', text: t('app.provider.switchFailed', { message: (e as Error).message }) });
             break;
           }
+          providerNameRef.current = arg;
           setModel(nextModel);
           const modelNote =
             preset.model !== undefined
@@ -974,6 +1112,8 @@ export function App({
           clearDynamicTools();
           setPlanModeBoth(false);
           prePlanModeRef.current = null;
+          // 思考深度覆盖是会话级状态：新会话回落 config 默认（/fork 复制会话，保留覆盖）
+          setThinkOverride(undefined);
           setItems([{ kind: 'note', text: t('app.new.started', { id: sessionRef.current.id }) }]);
           setSessionEpoch((e) => e + 1);
           break;
@@ -1121,13 +1261,34 @@ export function App({
           clearDynamicTools();
           setPlanModeBoth(false);
           prePlanModeRef.current = null;
+          // 思考深度覆盖是会话级状态：恢复到别的会话时回落 config 默认
+          setThinkOverride(undefined);
           setUsedTokens(0);
-          setItems([{ kind: 'note', text: t('app.resume.switched', { id: data.id, count: history.current.length }) }]);
+          {
+            const replay = historyToDisplayItems(data.messages);
+            const switchedNote: DisplayItem = {
+              kind: 'note',
+              text: t('app.resume.switched', {
+                id: data.id,
+                turns: replay.totalTurns,
+                count: history.current.length,
+              }),
+            };
+            const nextItems: DisplayItem[] = [];
+            if (replay.foldedTurns > 0) {
+              nextItems.push({
+                kind: 'note',
+                text: t('app.replay.folded', { folded: replay.foldedTurns, total: replay.totalTurns }),
+              });
+            }
+            nextItems.push(...replay.items, switchedNote);
+            setItems(nextItems);
+          }
           setSessionEpoch((e) => e + 1);
           break;
         }
         case 'skill': {
-          const skills = ctx.skills;
+          const skills = skillsRef.current;
           const trimmed = args.trim();
           const names = skills !== undefined ? [...skills.skills.keys()] : [];
           // 无参：列出可用技能（只读，busy 时即时）
@@ -1136,6 +1297,25 @@ export function App({
               kind: 'note',
               text: names.length > 0 ? t('app.skill.list', { names: names.join('、') }) : t('app.skill.none'),
             });
+            break;
+          }
+          // 保留子命令：reload 强制全量重扫 skill 目录（优先于同名 skill 激活）
+          if (trimmed === 'reload' || trimmed.startsWith('reload ') || trimmed.startsWith('reload\t')) {
+            const diff = reloadSkills(true);
+            if (diff === null || (diff.added.length + diff.removed.length + diff.changed.length) === 0) {
+              pushItem({ kind: 'note', text: t('app.skill.reload.none') });
+            } else {
+              pushItem({
+                kind: 'note',
+                text: t('app.skill.reload.done', {
+                  added: diff.added.length > 0 ? diff.added.join('、') : '—',
+                  removed: diff.removed.length > 0 ? diff.removed.join('、') : '—',
+                  changed: diff.changed.length > 0 ? diff.changed.join('、') : '—',
+                }),
+              });
+            }
+            const conflictNote = skillConflictNote();
+            if (conflictNote !== null) pushItem({ kind: 'note', text: conflictNote });
             break;
           }
           // 带参：<name> [args]，命中则像模型激活一样把正文注入会话跑一轮
@@ -1182,7 +1362,7 @@ export function App({
       }
       return true;
     },
-    [applyModelAlias, changeMode, compaction, config, ctx.cwd, exit, mcp, model, persist, pluginCommandMap, pluginCommandNames, pushItem, setPlanModeBoth, store],
+    [applyModelAlias, applyThinkLevel, changeMode, compaction, config, ctx.cwd, exit, mcp, model, persist, pluginCommandMap, pluginCommandNames, pushItem, reloadSkills, setPlanModeBoth, skillConflictNote, skillsRef, store, thinkOverride],
   );
 
   const submit = useCallback(
@@ -1239,6 +1419,21 @@ export function App({
       pendingImages.current = [];
       setImageCount(0);
 
+      // turn 边界 skill 指纹检测：目录有变更时静默全量重扫并提示（零成本：指纹未变直接跳过）
+      const skillDiff = reloadSkills(false);
+      if (skillDiff !== null && (skillDiff.added.length + skillDiff.removed.length + skillDiff.changed.length) > 0) {
+        pushItem({
+          kind: 'note',
+          text: t('app.skill.autoReload', {
+            added: skillDiff.added.length > 0 ? skillDiff.added.join('、') : '—',
+            removed: skillDiff.removed.length > 0 ? skillDiff.removed.join('、') : '—',
+            changed: skillDiff.changed.length > 0 ? skillDiff.changed.join('、') : '—',
+          }),
+        });
+        const conflictNote = skillConflictNote();
+        if (conflictNote !== null) pushItem({ kind: 'note', text: conflictNote });
+      }
+
       setBusy(true);
       busyRef.current = true;
       const controller = new AbortController();
@@ -1262,7 +1457,7 @@ export function App({
         },
         compactionModel: compaction.model,
         sessionCounter: subagentCounter.current,
-        skills: ctx.skills, // 子 agent 共享 skill
+        skills: skillsRef.current, // 子 agent 共享 skill（取当前注册表，支持 reload 后即时生效）
         onEvent: (id, ev) => {
           // 按 id 路由子 agent 进度事件（start 建条目 / tool 计数 / end 标完成）
           const sid = id ?? 'main';
@@ -1300,13 +1495,16 @@ export function App({
           });
         },
       });
+      // system 按当前 skill 注册表逐轮组合：systemPrefix + skill 清单 + AGENTS.md 尾部（reload 后下一轮即生效）
+      const systemNow = systemPrefix + skillListing(skillsRef.current) + (agentsMd !== '' ? `\n\n${agentsMd}` : '');
       try {
         for await (const ev of runAgent({
           provider: providerRef.current,
           // SessionStart hook 注入的上下文拼在 system 尾部（注入前为空串则原样）
-          system: sessionContextRef.current !== '' ? `${system}\n\n${sessionContextRef.current}` : system,
+          system: sessionContextRef.current !== '' ? `${systemNow}\n\n${sessionContextRef.current}` : systemNow,
           ctx: {
             ...ctx,
+            skills: skillsRef.current, // 覆盖启动快照，取当前注册表
             signal: controller.signal,
             depth: 0,
             runSubagent,
@@ -1335,6 +1533,8 @@ export function App({
           signal: controller.signal,
           hooks,
           model,
+          // 会话级思考深度覆盖（/think）：undefined 跟随构造默认，'off' → null 抑制，档位 → budget 覆盖
+          thinking: thinkStreamParam(thinkOverride, thinkLevelsOf(config.thinking)),
           compaction: {
             maxContextSize,
             triggerRatio: compaction.triggerRatio,
@@ -1373,7 +1573,7 @@ export function App({
         }
       }
     },
-    [applyEvent, askUserQuestion, buildHooks, compaction, ctx, handleSlash, hookEngine, maxContextSize, model, persist, pluginCommandNames, pushItem, subagent, system],
+    [agentsMd, applyEvent, askUserQuestion, buildHooks, compaction, ctx, handleSlash, hookEngine, maxContextSize, model, persist, pluginCommandNames, pushItem, reloadSkills, skillConflictNote, skillsRef, subagent, systemPrefix, thinkOverride],
   );
 
   // cron 触发时把 prompt 静默注入跑一轮（不记输入历史、不显示 user 条目，转录区只留触发卡片）
@@ -1424,6 +1624,17 @@ export function App({
     channel: entry.provider ?? config.provider,
     current: (entry.model ?? alias) === model,
   }));
+  // 思考深度选择器候选清单：档位表各档（右列 budget）+ 尾部 off 项；
+  // 当前项按会话覆盖判定（无覆盖时命中 config 默认档位算当前）。
+  const thinkLevels = thinkLevelsOf(config.thinking);
+  const thinkPickerItems: ThinkPickerItem[] = [
+    ...Object.entries(thinkLevels).map(([name, budget]) => ({
+      name,
+      detail: t('thinkPicker.budget', { budget }),
+      current: thinkOverride === undefined ? name === config.thinking?.defaultLevel : name === thinkOverride,
+    })),
+    { name: 'off', detail: t('thinkPicker.offDetail'), current: thinkOverride === 'off' },
+  ];
   const staticEntries: Array<{ kind: 'welcome' } | DisplayItem> = [
     { kind: 'welcome' },
     ...items.slice(0, settledCount),
@@ -1437,20 +1648,62 @@ export function App({
   // 输入区/弹层行数：弹层替换输入区时按各组件实测结构估算；常态用 computePromptRows 按输入内容
   // 实测——斜杠菜单、长输入折行都计入，不再是恒定 4 行（busy 期间敲 / 必超屏的洞即出于此）。
   let promptRows: number;
+  // 弹层内宽（边框 2 + paddingX 2）；列数未知时按结构估算（每逻辑行 1 行）
+  const overlayInner = stdout?.columns === undefined ? undefined : stdout.columns - 4;
   if (pendingQuestion !== null) {
-    promptRows = estimateQuestionRows(pendingQuestion);
+    promptRows = estimateQuestionRows(pendingQuestion, stdout?.columns);
   } else if (pendingPlan !== null) {
-    // 计划确认框：margin 1 + 边框 2 + 标题 1 + 计划正文 N 行 + 提示 1
-    promptRows = 5 + pendingPlan.plan.split('\n').length;
-  } else if (pending !== null) {
-    promptRows = estimateApprovalRows(pending);
-  } else if (modelPickerOpen) {
-    // 模型选择器：margin 1 + 边框 2 + 标题 1 + 搜索 1 + 提示 1 + 当前页（≤10）+ 页码/缓存警告各 ≤1
+    // 计划确认框：margin 1 + 边框 2 + 标题（折行）+ 计划正文逐行折行 + 提示（折行）
+    const planHint = `y${t('app.plan.readyHintMiddle')}n${t('app.plan.readyHintEnd')}`;
     promptRows =
-      6 +
-      Math.min(modelPickerItems.length, 10) +
-      (modelPickerItems.length > 10 ? 1 : 0) +
-      (history.current.length > 0 ? 1 : 0);
+      1 +
+      2 +
+      wrappedRows(t('app.plan.readyTitle'), overlayInner) +
+      pendingPlan.plan.split('\n').reduce((n, line) => n + wrappedRows(line, overlayInner), 0) +
+      wrappedRows(planHint, overlayInner);
+  } else if (pending !== null) {
+    promptRows = estimateApprovalRows(pending, stdout?.columns);
+  } else if (modelPickerOpen) {
+    // 模型选择器（上界估算，宁多勿少）：margin 1 + 边框 2 + 标题/缓存警告/搜索/页码/提示（折行）
+    // + 条目行——每条宽 = 指针 2 + 左列（截断至终端宽一半）+ 间隔 2 + 渠道列 + 当前标记，折行后取最宽的 ≤10 条。
+    // 搜索行的过滤词是组件内部状态、App 不可知，按 1 行计（长过滤词折行为已知小风险）。
+    const cap = Math.max(Math.floor((stdout?.columns ?? 80) / 2), 8);
+    const colW = Math.min(Math.max(0, ...modelPickerItems.map((m) => m.label.length)), cap);
+    const itemRows = modelPickerItems
+      .map((m) => {
+        const width =
+          2 + colW + 2 + displayWidth(m.channel) + (m.current ? 1 + displayWidth(t('modelPicker.current')) : 0);
+        return overlayInner === undefined ? 1 : Math.max(1, Math.ceil(width / overlayInner));
+      })
+      .sort((a, b) => b - a)
+      .slice(0, 10)
+      .reduce((n, r) => n + r, 0);
+    promptRows =
+      1 +
+      2 +
+      wrappedRows(t('modelPicker.title'), overlayInner) +
+      (history.current.length > 0 ? wrappedRows(t('modelPicker.cacheWarning'), overlayInner) : 0) +
+      1 + // 搜索行
+      Math.max(itemRows, modelPickerItems.length > 0 ? 1 : wrappedRows(t('modelPicker.empty'), overlayInner)) +
+      (modelPickerItems.length > 10
+        ? wrappedRows(t('sessionPicker.pageInfo', { start: 1, end: 10, total: modelPickerItems.length }), overlayInner)
+        : 0) +
+      wrappedRows(t('modelPicker.hint'), overlayInner);
+  } else if (thinkPickerOpen) {
+    // 思考深度选择器（上界估算）：margin 1 + 边框 2 + 标题/缓存警告/提示（折行）+ 全部档位条目（折行）
+    const colW = Math.max(0, ...thinkPickerItems.map((m) => m.name.length));
+    const itemRows = thinkPickerItems.reduce((n, m) => {
+      const width =
+        2 + colW + 2 + displayWidth(m.detail) + (m.current ? 1 + displayWidth(t('modelPicker.current')) : 0);
+      return n + (overlayInner === undefined ? 1 : Math.max(1, Math.ceil(width / overlayInner)));
+    }, 0);
+    promptRows =
+      1 +
+      2 +
+      wrappedRows(t('thinkPicker.title'), overlayInner) +
+      (history.current.length > 0 ? wrappedRows(t('app.think.cacheWarning'), overlayInner) : 0) +
+      Math.max(itemRows, thinkPickerItems.length > 0 ? 1 : wrappedRows(t('thinkPicker.empty'), overlayInner)) +
+      wrappedRows(t('thinkPicker.hint'), overlayInner);
   } else {
     promptRows = computePromptRows(input, {
       busy,
@@ -1542,6 +1795,15 @@ export function App({
             if (alias !== null) applyModelAlias(alias);
           }}
         />
+      ) : thinkPickerOpen ? (
+        <ThinkPicker
+          items={thinkPickerItems}
+          hasHistory={history.current.length > 0}
+          onSelect={(name) => {
+            setThinkPickerOpen(false);
+            if (name !== null) applyThinkLevel(name);
+          }}
+        />
       ) : (
         <PromptInput value={input} onChange={setInput} onSubmit={submit} busy={busy} history={inputHistory} primed={backtrackPrimed} exitPrimed={exitPrimed} />
       )}
@@ -1549,6 +1811,11 @@ export function App({
         mode={mode}
         planMode={planMode}
         model={modelLabel}
+        thinking={
+          thinkingAvailable(providerNameRef.current, config.thinking)
+            ? thinkStatusLabel(thinkOverride, config.thinking)
+            : undefined
+        }
         busy={busy}
         cwd={ctx.cwd}
         usedTokens={usedTokens}

@@ -55,17 +55,32 @@ describe('createProvider', () => {
   });
 
   it('stepfun + [thinking] enabled=true → sendThinking 覆盖为 true 并注入 budget', () => {
-    const p = createProvider(baseConfig({ thinking: { enabled: true, budgetTokens: 4096 } }));
+    const p = createProvider(baseConfig({ thinking: { enabled: true, budgetTokens: 4096, levels: { low: 1024 } } }));
     const internals = p as unknown as { sendThinking: boolean; thinking?: { budgetTokens?: number } };
     expect(internals.sendThinking).toBe(true);
     expect(internals.thinking).toEqual({ budgetTokens: 4096 });
   });
 
   it('stepfun + [thinking] enabled=true 未配 budget → thinking 参数存在但无 budgetTokens', () => {
-    const p = createProvider(baseConfig({ thinking: { enabled: true } }));
+    const p = createProvider(baseConfig({ thinking: { enabled: true, levels: { low: 1024 } } }));
     const internals = p as unknown as { sendThinking: boolean; thinking?: { budgetTokens?: number } };
     expect(internals.sendThinking).toBe(true);
     expect(internals.thinking).toEqual({ budgetTokens: undefined });
+  });
+
+  it('[thinking] default_level 命中档位 → 该档 budget 作为构造默认（优先于 budget_tokens）', () => {
+    const p = createProvider(
+      baseConfig({
+        thinking: {
+          enabled: true,
+          budgetTokens: 4096,
+          levels: { low: 1024, high: 32000 },
+          defaultLevel: 'high',
+        },
+      }),
+    );
+    const internals = p as unknown as { thinking?: { budgetTokens?: number } };
+    expect(internals.thinking).toEqual({ budgetTokens: 32000 });
   });
 
   it('stepfun 未配 [thinking] → sendThinking 保持 false，无 thinking 参数（既有行为不变）', () => {

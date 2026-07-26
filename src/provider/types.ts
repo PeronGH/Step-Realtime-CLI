@@ -22,5 +22,10 @@ export interface ChatProvider {
     signal?: AbortSignal;
     /** 模型覆盖；省略用构造时的默认模型。 */
     model?: string;
+    /**
+     * thinking 覆盖（三态）：undefined 用构造默认；对象本次覆盖；null 本次强制不发 thinking 字段。
+     * 仅 anthropic 协议实现消费；其余协议实现忽略此参数。
+     */
+    thinking?: { budgetTokens?: number } | null;
   }): ReturnType<Anthropic['messages']['stream']>;
 }

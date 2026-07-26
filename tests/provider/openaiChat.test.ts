@@ -216,6 +216,27 @@ describe('httpErrorToApiError', () => {
     const err = httpErrorToApiError(500, 'internal error', new Headers());
     expect((err as { status?: number }).status).toBe(500);
   });
+  it('裸 JSON 无 error.message（{"type":"error"} 现场）→ 合成摘要带 type 与截断 body', () => {
+    const err = httpErrorToApiError(400, '{"type":"error"}', new Headers());
+    expect((err as { status?: number }).status).toBe(400);
+    expect(err.message).toBe('400 error · {"type":"error"}');
+  });
+  it('body 为空 → message 保留状态码与占位说明', () => {
+    const err = httpErrorToApiError(502, '', new Headers());
+    expect(err.message).toBe('502 (no body)');
+  });
+  it('顶层 message 形（部分网关）→ 直接采用', () => {
+    const err = httpErrorToApiError(403, '{"message":"forbidden"}', new Headers());
+    expect(err.message).toBe('403 forbidden');
+  });
+  it('标准 error.message 形 → err.message 可读（不再是整段 JSON）', () => {
+    const err = httpErrorToApiError(
+      400,
+      '{"error":{"type":"invalid_request_error","message":"bad prompt"}}',
+      new Headers(),
+    );
+    expect(err.message).toBe('400 bad prompt');
+  });
 });
 
 describe('OpenAiChatProvider 流式响应翻译', () => {

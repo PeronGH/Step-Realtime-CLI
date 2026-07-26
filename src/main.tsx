@@ -21,7 +21,7 @@ import { loadConfig, type StepCodeConfig } from './config/config.js';
 import { setLocale, t } from './i18n.js';
 import { discoverPlugins, defaultPluginsDir } from './plugin/manager.js';
 import { pluginsStatePath, readPluginsState } from './plugin/manage.js';
-import { buildSkillRegistry, skillListing } from './skill/registry.js';
+import { buildSkillRegistry, diffSkillRegistries, fingerprintSkillRoots, skillListing, type SkillRegistry, type SkillRegistryDiff } from './skill/registry.js';
 import { McpManager, mcpInputSchemaToZod, type McpServerConfig } from './mcp/manager.js';
 import { registerDynamicTool } from './tools/index.js';
 import { createProvider } from './provider/factory.js';
@@ -160,13 +160,34 @@ const pluginsState = readPluginsState(pluginsStatePath());
 const plugins = discoverPlugins(defaultPluginsDir(), new Set(pluginsState.disabled));
 const pluginSkillDirs = plugins.flatMap((p) => p.skillDirs);
 // skill 懒加载：发现 plugin skill + 项目/用户 skill，构建注册表；清单拼进 system prompt（正文不进）。
-const skillRegistry = buildSkillRegistry(cwd, pluginSkillDirs, config.extraSkillDirs);
+// disabled_skills 按名排除（合并后统一过滤，任何来源生效）。
+// skillsRef 持有当前注册表：reload（/skill reload 或 turn 边界指纹检测）后整体换引用，
+// system prompt 的清单部分随 composeSystem() 在每次调用时重建，无需重启进程。
+const skillsRef: { current: SkillRegistry } = {
+  current: buildSkillRegistry(cwd, pluginSkillDirs, config.extraSkillDirs, config.disabledSkills),
+};
+let skillFingerprint = fingerprintSkillRoots(cwd, pluginSkillDirs, config.extraSkillDirs);
+/**
+ * 重扫 skill 目录：指纹未变且非强制时返回 null（零成本 fast path）；
+ * 有变化（或强制）时全量重建注册表并返回 diff（对齐 Codex「缓存 + 失效 + 用到时重扫」配方）。
+ */
+const reloadSkills = (force = false): SkillRegistryDiff | null => {
+  const fp = fingerprintSkillRoots(cwd, pluginSkillDirs, config.extraSkillDirs);
+  if (!force && fp === skillFingerprint) return null;
+  const next = buildSkillRegistry(cwd, pluginSkillDirs, config.extraSkillDirs, config.disabledSkills);
+  const diff = diffSkillRegistries(skillsRef.current, next);
+  skillsRef.current = next;
+  skillFingerprint = fp;
+  return diff;
+};
 // AGENTS.md 自动加载：用户级 + 项目级逐层收集，非空时拼到 system prompt 尾部
 // config.toml 的 agents_paths 配置后覆盖默认收集
 const agentsMd = loadAgentsMd(cwd, undefined, config.agentsPaths);
-const system =
-  buildSystemPrompt(cwd) + skillListing(skillRegistry) + (agentsMd !== '' ? `\n\n${agentsMd}` : '');
-const ctx: ToolContext = { cwd, apiKey: config.apiKey, baseUrl: config.baseUrl, skills: skillRegistry };
+const systemPrefix = buildSystemPrompt(cwd);
+/** 组合当前 system prompt：静态前缀 + 当前 skill 清单（随 reload 更新）+ AGENTS.md。 */
+const composeSystem = (): string =>
+  systemPrefix + skillListing(skillsRef.current) + (agentsMd !== '' ? `\n\n${agentsMd}` : '');
+const ctx: ToolContext = { cwd, apiKey: config.apiKey, baseUrl: config.baseUrl, skills: skillsRef.current };
 // bash 前台超时自动转后台开关（[background].bash_auto_background_on_timeout，默认 true）
 ctx.bashAutoBackgroundOnTimeout = config.background?.bashAutoBackgroundOnTimeout ?? true;
 
@@ -407,7 +428,7 @@ async function runPrint(prompt: string): Promise<void> {
   for await (const ev of runAgent({
     provider,
     // SessionStart hook 注入的上下文拼在 system 尾部（仅本轮生效）
-    system: hookContext !== '' ? `${system}\n\n${hookContext}` : system,
+    system: hookContext !== '' ? `${composeSystem()}\n\n${hookContext}` : composeSystem(),
     ctx: subCtx,
     messages: session.messages,
     hooks,
@@ -493,7 +514,10 @@ if (opts.reflect === true) {
   const tui = render(
     <App
       provider={provider}
-      system={system}
+      systemPrefix={systemPrefix}
+      agentsMd={agentsMd}
+      skillsRef={skillsRef}
+      reloadSkills={reloadSkills}
       ctx={ctx}
       model={config.model}
       config={config}

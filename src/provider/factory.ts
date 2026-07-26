@@ -43,13 +43,19 @@ export function createProvider(config: StepCodeConfig): ChatProvider {
   // stepfun 预设 sendThinking 为 false（历史实测部分模型 400），此处由用户配置覆盖为 true；
   // anthropic 预设虽为 true，未配 [thinking] 时 thinking 参数为空，照样不发。
   // [thinking] 的 budget 语义只对 anthropic 有效；openai 协议下上面已分发、不走到这里，故忽略。
+  // default_level 命中档位表时其 budget 作为构造默认（会话级 /think 覆盖之外的基线）；
+  // 未配 default_level 时回落 budget_tokens（旧行为）。
   const thinkingEnabled = config.thinking?.enabled === true;
+  const defaultLevelBudget =
+    config.thinking?.defaultLevel !== undefined
+      ? config.thinking.levels[config.thinking.defaultLevel]
+      : undefined;
   return new AnthropicMessagesProvider({
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
     maxTokens: config.maxTokens,
     sendThinking: preset.sendThinking || thinkingEnabled,
-    thinking: thinkingEnabled ? { budgetTokens: config.thinking?.budgetTokens } : undefined,
+    thinking: thinkingEnabled ? { budgetTokens: defaultLevelBudget ?? config.thinking?.budgetTokens } : undefined,
   });
 }

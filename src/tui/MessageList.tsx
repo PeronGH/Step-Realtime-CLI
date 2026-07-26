@@ -39,8 +39,11 @@ export function ThinkingPreview({ text, maxLines = THINKING_PREVIEW_LINES }: { t
  *
  * 规则（仅 busy 时才可能有未完条目；非 busy 时回合已结束，全部定稿——
  * 包括 abort 残留的 status === 'running' 工具，此后不会再有任何事件更新它）：
- * - busy 时最后一条 assistant 仍在流式增长，且 busy 期间以 transient（关高亮）渲染，
- *   形态未定，留动态区；
+ * - 仅**末尾**的 assistant 仍可能流式增长（text 事件只往末尾 assistant 追加；
+ *   其后一旦出现任何条目，新文本会另开 assistant 条目，旧条物理上不可能再增长），
+ *   且 busy 期间以 transient（关高亮）渲染，形态未定，留动态区。
+ *   非末尾的 assistant 即时定稿——长正文流完进入工具执行期后不再被窗口化压整轮，
+ *   「已隐藏 N 行」随定稿释放，全文立即进 scrollback。
  * - busy 时 status === 'running' 的 tool 条目还会被 tool_end 更新；
  *   workflow 面板的所有推进（onWorkflowStep / wf- 子 agent 事件）都经 activeWorkflowRef
  *   门控，tool_end 时该引用同步出栈，因此 status 离开 running 后面板即冻结，可安全定稿。
@@ -48,12 +51,10 @@ export function ThinkingPreview({ text, maxLines = THINKING_PREVIEW_LINES }: { t
 export function countSettledItems(items: DisplayItem[], busy: boolean): number {
   if (!busy) return items.length;
   let settled = items.length;
-  // 最后一条 assistant：流式增长 + transient 高亮态未完成
-  for (let i = items.length - 1; i >= 0; i--) {
-    if (items[i]!.kind === 'assistant') {
-      settled = Math.min(settled, i);
-      break;
-    }
+  // 末尾 assistant：可能仍在流式增长 + transient 高亮态未完成
+  const last = items[items.length - 1];
+  if (last !== undefined && last.kind === 'assistant') {
+    settled = items.length - 1;
   }
   // 运行中的工具（含 workflow 面板运行中）：后续还有 tool_end / 步骤事件更新
   for (let i = 0; i < items.length; i++) {

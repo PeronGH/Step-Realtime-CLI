@@ -2,12 +2,43 @@ import Anthropic from '@anthropic-ai/sdk';
 import { t } from '../i18n.js';
 
 /**
+ * 识别 Anthropic SDK 的空流错误：MessageStream 在没收到任何 message_start 的情况下被
+ * drain 完，finalMessage() 抛出不带 HTTP status 的 AnthropicError，是网关/服务端瞬时故障
+ * 的典型表现。对齐 某竞品CLI（无 status 的 provider 错误默认可重试）与 Codex
+ * （closed before terminal event → 可重试 Stream）的判定。
+ */
+export function isEmptyStreamError(err: unknown): boolean {
+  return (
+    err instanceof Anthropic.AnthropicError &&
+    !(err instanceof Anthropic.APIError) &&
+    /stream ended without producing/i.test(err.message)
+  );
+}
+
+/**
+ * 空响应错误：流「正常」结束，但终态消息既没有正文也没有工具调用（含 thinking-only
+ * 变体——思考不构成正文，可能是流中断或 reasoning 烧光了输出预算）。由 runTurn 拿到
+ * finalMessage 后抛出，与 SDK 空流错误走同一条重试路径。
+ */
+export class EmptyResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyResponseError';
+  }
+}
+
+/**
  * 判断一个错误是否值得重试。
- * 可重试：网络连接错误、超时、429（限流）、5xx（服务端）。
+ * 可重试：网络连接错误、超时、429（限流）、5xx（服务端）、空流/空响应。
  * 不可重试：4xx（除 429，通常是请求本身有问题，重试无益）。
  */
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof Anthropic.APIConnectionError || err instanceof Anthropic.APIConnectionTimeoutError) {
+    return true;
+  }
+  // 空流/空响应：对端在产出任何内容前结束了生成，多为瞬时故障；
+  // 配合 runTurn「未吐字才重试」守卫，归可重试是安全的。
+  if (err instanceof EmptyResponseError || isEmptyStreamError(err)) {
     return true;
   }
   if (err instanceof Anthropic.APIError && typeof err.status === 'number') {
@@ -39,6 +70,42 @@ export function errorAdvice(err: unknown): string | undefined {
     if (err.status === 429) return t('error.advice.rateLimit');
   }
   return undefined;
+}
+
+/**
+ * 面向用户的错误摘要：HTTP 状态码 + 错误类型 + 服务端消息。
+ * SDK APIError 的 message 固定形如「{status} {body}」，body 可能是裸 JSON（网关原文，
+ * 线上实测 `{"type":"error"}`）；这里剥掉状态码前缀、提取 JSON 里的可读字段，
+ * 非 APIError 原样返回。输出形如 `HTTP 400 · invalid_request_error: prompt is too long`。
+ */
+export function summarizeError(err: unknown): string {
+  const raw = (err as Error | undefined)?.message ?? String(err);
+  const status = err instanceof Anthropic.APIError && typeof err.status === 'number' ? err.status : undefined;
+  let type = (err as { type?: string | null } | undefined)?.type ?? undefined;
+  let body = raw.trim();
+  if (status !== undefined && body.startsWith(`${status} `)) {
+    body = body.slice(`${status} `.length);
+  }
+  if (body.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(body) as {
+        error?: { type?: string; message?: string };
+        type?: string;
+        message?: string;
+      };
+      type = parsed.error?.type ?? parsed.type ?? type;
+      const msg = parsed.error?.message ?? parsed.message;
+      if (typeof msg === 'string') {
+        body = msg;
+      } else if (body.length > 200) {
+        body = `${body.slice(0, 200)}…`;
+      }
+    } catch {
+      // 非 JSON，按原文展示
+    }
+  }
+  const typed = type !== undefined && !body.includes(type) ? `${type}: ${body}` : body;
+  return status !== undefined ? `HTTP ${status} · ${typed}` : typed;
 }
 
 /**

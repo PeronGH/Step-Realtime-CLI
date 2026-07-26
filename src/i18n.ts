@@ -112,6 +112,21 @@ const zh = {
   'modelPicker.cacheWarning': '切换模型会使已有 prompt cache 失效，/new 开新会话可避免额外 token 消耗',
   'modelPicker.hint': '↑/↓ 选择 · 输入过滤 · Enter 切换 · Esc 取消',
 
+  // --- 思考深度选择器（ThinkPicker）与 /think 命令 ---
+  'thinkPicker.title': '选择思考深度',
+  'thinkPicker.empty': '无可用档位',
+  'thinkPicker.hint': '↑/↓ 选择 · Enter 切换 · Esc 取消',
+  'thinkPicker.budget': 'budget {budget}',
+  'thinkPicker.offDetail': '关闭 thinking 字段',
+  'app.think.unavailable': '当前渠道/模型未启用 thinking 字段，思考深度不可用（仅 anthropic 协议且允许发送 thinking 时可用）。',
+  'app.think.invalid': '未知思考深度档位：{name}（可用：{list}，或 off 关闭）',
+  'app.think.switched': '思考深度已切换为：{level}（{detail}，下一轮请求生效）',
+  'app.think.cacheWarning': '切换思考深度会使已有 prompt cache 失效，/new 开新会话可避免额外 token 消耗',
+  'app.think.status': '当前生效：{current} · 配置默认：{defaultLevel}\n可用档位：\n{lines}',
+  'app.think.levelLine': '  {name} = {budget}',
+  'app.think.followDefault': '跟随配置默认',
+  'app.think.noDefault': '未设置',
+
   // --- TODO 面板（TodoPanel）---
   'todo.title': '任务清单',
   'todo.more': '… +{count} more',
@@ -133,8 +148,9 @@ const zh = {
   'background.status.killed': '已终止',
 
   // --- App 会话与图片提示 ---
-  'app.resumed': '已恢复会话 {id}（{count} 条消息）。',
+  'app.resumed': '已恢复会话 {id}（{turns} 轮 · {count} 条消息）。',
   'exit.resumeHint': '恢复本会话：{command}',
+  'app.replay.folded': '（更早的 {folded} 轮历史已折叠，共 {total} 轮）',
   'app.image.reading': '正在读取剪贴板图片…',
   'app.image.none': '剪贴板里没有图片（或当前平台/终端不支持）。',
   'app.image.attached': '已附加图片（共 {count} 张）。输入为空时按退格可删除最后一张。',
@@ -246,13 +262,18 @@ const zh = {
   'app.resume.list': '历史会话（* 为当前）：\n{lines}\n输入 /resume <id> 切换。',
   'app.resume.busy': '会话进行中，无法切换。等当前回合结束再试。',
   'app.resume.notFound': '未找到会话 {id}',
-  'app.resume.switched': '已切换到会话 {id}（{count} 条历史）。',
+  'app.resume.switched': '已切换到会话 {id}（{turns} 轮 · {count} 条历史）。',
   'app.unknownCommand': '未知命令：{command}（输入 /help 查看可用命令）',
   'app.skill.list': '可用技能：{names}\n用 /skill <名称> [参数] 激活。',
   'app.skill.none': '暂无可用技能。把 SKILL.md 放到 .step-code/skills/ 或 .agents/skills/ 下即可。',
   'app.skill.noneShort': '（无）',
   'app.skill.unknown': '未知技能「{name}」。可用：{names}',
   'app.skill.activated': '已激活技能「{name}」，正在按其指令执行……',
+  'app.skill.reload.done': '技能已重载：新增 [{added}] · 移除 [{removed}] · 变更 [{changed}]',
+  'app.skill.reload.none': '技能无变化（已强制重扫）。',
+  'app.skill.autoReload': '检测到技能目录变更，已自动重载：新增 [{added}] · 移除 [{removed}] · 变更 [{changed}]',
+  'app.skill.conflict.header': '同名技能冲突 {count} 项，已按优先级采用（plugin > 追加目录 > 项目 .step-code/skills > 项目 .agents/skills > 用户级）：',
+  'app.skill.conflict.line': '「{name}」采用 {winner}，覆盖 {losers}',
   'app.agent.activityError': '错误:{message}',
 
   // --- App /plugin 管理命令与 plugin 命名空间命令 ---
@@ -279,6 +300,7 @@ const zh = {
   // --- 斜杠命令 describe（commands.ts；cmd.helpText.* 为 /help 拼接模板）---
   'cmd.help': '显示可用命令',
   'cmd.model': '显示或切换模型：/model [名称]',
+  'cmd.think': '显示或设置思考深度：/think [档位名|off]',
   'cmd.permission': '显示或设置权限模式：/permission [manual|auto|yolo]',
   'cmd.yolo': '切到 yolo 模式（全部放行）',
   'cmd.auto': '切到 auto 模式（写放行，bash 需确认）',
@@ -295,7 +317,7 @@ const zh = {
   'cmd.resume': '切换到指定历史会话：/resume <id>（不带 id 列出可选会话）',
   'cmd.lang': '显示或切换界面语言：/lang [zh|en]',
   'cmd.mcp': '查看 MCP server 连接状态与工具数',
-  'cmd.skill': '激活技能或列出可用技能：/skill [名称] [参数]',
+  'cmd.skill': '激活技能或列出可用技能：/skill [名称] [参数]；/skill reload 强制重扫技能目录',
   'cmd.plugin': '管理 plugin：/plugin [list|install|enable|disable|remove|info]',
   'cmd.exit': '退出 Step Code',
   'cmd.helpText.aliasSuffix': '（/{aliases}）',
@@ -339,6 +361,7 @@ const zh = {
   // --- 错误码 → 建议用户动作（附加在 error 事件文案后；最小目录，见 errorAdvice）---
   'error.advice.auth': '建议：API key 无效或权限不足，请检查 STEP_CODE_API_KEY 环境变量或 config.toml 中的 key 配置。',
   'error.advice.rateLimit': '建议：限流持续存在，请稍后重试，或检查账户配额。',
+  'error.emptyStream': '服务端返回了空响应：在产出任何内容前就结束了生成。通常是网关或服务端的瞬时故障，请重新发送；持续出现请检查服务商状态。',
 
   // --- provider 工厂（main.tsx 在 setLocale 之后调用，翻得到）---
   'factory.unknownProvider': "未知服务商 provider='{provider}'。当前支持：{list}。",
@@ -429,6 +452,21 @@ const en: Record<keyof typeof zh, string> = {
   'modelPicker.cacheWarning': 'Switching models invalidates the existing prompt cache; start a new session with /new to avoid extra token cost',
   'modelPicker.hint': '↑/↓ select · type to filter · Enter switch · Esc cancel',
 
+  // --- 思考深度选择器（ThinkPicker）与 /think 命令 ---
+  'thinkPicker.title': 'Select thinking level',
+  'thinkPicker.empty': 'No levels available',
+  'thinkPicker.hint': '↑/↓ select · Enter switch · Esc cancel',
+  'thinkPicker.budget': 'budget {budget}',
+  'thinkPicker.offDetail': 'disable the thinking field',
+  'app.think.unavailable': 'The current provider/model does not send the thinking field; thinking level is unavailable (requires the anthropic protocol with thinking allowed).',
+  'app.think.invalid': 'Unknown thinking level: {name} (available: {list}, or off to disable)',
+  'app.think.switched': 'Thinking level switched to: {level} ({detail}, takes effect next turn)',
+  'app.think.cacheWarning': 'Switching thinking level invalidates the existing prompt cache; start a new session with /new to avoid extra token cost',
+  'app.think.status': 'Active: {current} · Config default: {defaultLevel}\nAvailable levels:\n{lines}',
+  'app.think.levelLine': '  {name} = {budget}',
+  'app.think.followDefault': 'follow config default',
+  'app.think.noDefault': 'not set',
+
   'todo.title': 'Tasks',
   'todo.more': '… +{count} more',
 
@@ -445,8 +483,9 @@ const en: Record<keyof typeof zh, string> = {
   'background.status.failed': 'failed',
   'background.status.killed': 'killed',
 
-  'app.resumed': 'Resumed session {id} ({count} messages).',
+  'app.resumed': 'Resumed session {id} ({turns} turns · {count} messages).',
   'exit.resumeHint': 'To resume this session: {command}',
+  'app.replay.folded': '({folded} earlier turns folded, {total} turns total)',
   'app.image.reading': 'Reading clipboard image…',
   'app.image.none': 'No image in clipboard (or unsupported on this platform/terminal).',
   'app.image.attached': 'Image attached ({count} total). Backspace with empty input removes the last one.',
@@ -549,13 +588,18 @@ const en: Record<keyof typeof zh, string> = {
   'app.resume.list': 'Past sessions (* = current):\n{lines}\nType /resume <id> to switch.',
   'app.resume.busy': 'Session busy; cannot switch. Try again after the current turn.',
   'app.resume.notFound': 'Session {id} not found',
-  'app.resume.switched': 'Switched to session {id} ({count} messages).',
+  'app.resume.switched': 'Switched to session {id} ({turns} turns · {count} messages).',
   'app.unknownCommand': 'Unknown command: {command} (type /help to see available commands)',
   'app.skill.list': 'Available skills: {names}\nActivate with /skill <name> [args].',
   'app.skill.none': 'No skills available. Put a SKILL.md under .step-code/skills/ or .agents/skills/.',
   'app.skill.noneShort': '(none)',
   'app.skill.unknown': 'Unknown skill "{name}". Available: {names}',
   'app.skill.activated': 'Activated skill "{name}", following its instructions…',
+  'app.skill.reload.done': 'Skills reloaded: added [{added}] · removed [{removed}] · changed [{changed}]',
+  'app.skill.reload.none': 'No skill changes (forced rescan done).',
+  'app.skill.autoReload': 'Skill directory changed, auto-reloaded: added [{added}] · removed [{removed}] · changed [{changed}]',
+  'app.skill.conflict.header': '{count} skill name conflict(s); resolved by priority (plugin > extra dirs > project .step-code/skills > project .agents/skills > user-level):',
+  'app.skill.conflict.line': '"{name}": using {winner}, overriding {losers}',
   'app.agent.activityError': 'error:{message}',
 
   // --- App /plugin management & plugin-namespaced commands ---
@@ -581,6 +625,7 @@ const en: Record<keyof typeof zh, string> = {
 
   'cmd.help': 'Show available commands',
   'cmd.model': 'Show or switch model: /model [name]',
+  'cmd.think': 'Show or set thinking level: /think [level|off]',
   'cmd.permission': 'Show or set permission mode: /permission [manual|auto|yolo]',
   'cmd.yolo': 'Switch to yolo mode (allow all)',
   'cmd.auto': 'Switch to auto mode (writes allowed, bash needs approval)',
@@ -597,7 +642,7 @@ const en: Record<keyof typeof zh, string> = {
   'cmd.resume': 'Switch to a past session: /resume <id> (no id: list sessions)',
   'cmd.lang': 'Show or switch UI language: /lang [zh|en]',
   'cmd.mcp': 'Show MCP server connection status and tool counts',
-  'cmd.skill': 'Activate a skill or list available skills: /skill [name] [args]',
+  'cmd.skill': 'Activate a skill or list available skills: /skill [name] [args]; /skill reload forces a rescan',
   'cmd.plugin': 'Manage plugins: /plugin [list|install|enable|disable|remove|info]',
   'cmd.exit': 'Quit Step Code',
   'cmd.helpText.aliasSuffix': ' (/{aliases})',
@@ -637,6 +682,7 @@ const en: Record<keyof typeof zh, string> = {
 
   'error.advice.auth': 'Hint: the API key is invalid or lacks permission. Check the STEP_CODE_API_KEY environment variable or the key in config.toml.',
   'error.advice.rateLimit': 'Hint: rate limiting persists. Retry later, or check your account quota.',
+  'error.emptyStream': 'The server returned an empty response: generation ended before any content was produced. Usually a transient gateway/server issue — please send again; if it persists, check the provider status.',
 
   'factory.unknownProvider': "Unknown provider provider='{provider}'. Supported: {list}.",
 };

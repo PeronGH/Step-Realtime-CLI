@@ -163,4 +163,31 @@ describe('MessageList 尾部锚定窗口（maxRows）', () => {
     expect(lines).not.toContain('s01');
     expect(lines.length).toBeLessThanOrEqual(8);
   });
+
+  it('流式逐拍增长回归：高频 commit 下测量 dispatch 不得累积成嵌套更新级联（线上闪退复现）', async () => {
+    // 线上事故：流式期间 token 更新合并进测量触发的嵌套渲染，级联自持触顶 React 嵌套上限，
+    // 整进程抛 Maximum update depth exceeded 闪退。逐拍推送 + 帧高恒超预算是最接近的现场。
+    const { rerender, lastFrame } = render(
+      <MessageList items={[assistant('s00')]} expanded={false} busy={true} maxRows={6} />,
+    );
+    const lines = ['s00'];
+    let threw: unknown;
+    try {
+      for (let i = 1; i <= 40; i++) {
+        lines.push(`s${String(i).padStart(2, '0')}`);
+        rerender(
+          <MessageList items={[assistant(lines.join('\n'))]} expanded={false} busy={true} maxRows={6} />,
+        );
+        await tick();
+      }
+    } catch (e) {
+      threw = e;
+    }
+    await settle();
+    expect(threw).toBeUndefined();
+    const out = lastFrame() ?? '';
+    expect(out).toContain('s40');
+    expect(out).toContain('已隐藏');
+    expect(frameLines(out).length).toBeLessThanOrEqual(6);
+  }, 30000);
 });

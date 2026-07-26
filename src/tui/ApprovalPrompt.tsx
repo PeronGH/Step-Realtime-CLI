@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from 'ink';
 import { useState } from 'react';
 import { t } from '../i18n.js';
+import { wrappedRows } from './liveBudget.js';
 
 export interface ApprovalRequest {
   name: string;
@@ -129,17 +130,36 @@ export function denyReason(feedback?: string): string {
 
 /**
  * 估算审批框渲染行数（供 App 计算动态区高度预算，滚动跳顶修复）。
- * 结构实测：marginTop 1 + 边框 2 + 标题 1 + 危险警告 N + 参数摘要 ≤1
- * + 预览（折叠态 ≤ PREVIEW_LIMIT 行，可折叠时 +1 提示行）+ 选项 4 + 底部提示 1。
+ * 结构：marginTop 1 + 边框 2 + 标题（折行）+ 危险警告 N（折行）+ 参数摘要（折行）
+ * + 预览（折叠态 ≤ PREVIEW_LIMIT 逻辑行，逐行折行；可折叠时 +1 提示行）+ 选项 4（折行）+ 底部提示（折行）。
+ * termCols 用于精确计算长命令/长预览行的折行（内宽 = 列数 − 边框 2 − paddingX 2）；
+ * 缺省时退化为每逻辑行 1 行（测试/非 TTY 场景），与旧结构估算等价。
  * 注：Ctrl+E 展开预览行数无界（用户显式动作），此处按折叠态估算；展开态下可能偶发一帧超高。
  */
-export function estimateChromeRows(req: ApprovalRequest): number {
-  const danger = dangerWarnings(bashCommand(req)).length;
+export function estimateChromeRows(req: ApprovalRequest, termCols?: number): number {
+  const innerWidth = termCols === undefined ? undefined : termCols - 4;
+  const titleKey = TITLE_KEYS[req.name];
+  const title = titleKey !== undefined ? t(titleKey) : t('approval.title', { name: req.name });
+  let rows = wrappedRows(title, innerWidth);
+  for (const k of dangerWarnings(bashCommand(req))) {
+    rows += wrappedRows(t(k), innerWidth);
+  }
+  const arg = summarizeInput(req.input);
+  if (arg !== '') rows += wrappedRows(arg, innerWidth);
   const preview = buildPreview(req);
-  const previewRows =
-    preview === null ? 0 : Math.min(preview.length, PREVIEW_LIMIT) + (preview.length > PREVIEW_LIMIT ? 1 : 0);
-  const argRows = summarizeInput(req.input) !== '' ? 1 : 0;
-  return 1 + 2 + 1 + danger + argRows + previewRows + OPTIONS.length + 1;
+  if (preview !== null && preview.length > 0) {
+    for (const line of preview.slice(0, PREVIEW_LIMIT)) {
+      rows += wrappedRows(line.text, innerWidth);
+    }
+    if (preview.length > PREVIEW_LIMIT) {
+      rows += wrappedRows(t('approval.preview.more', { shown: PREVIEW_LIMIT, total: preview.length }), innerWidth);
+    }
+  }
+  OPTIONS.forEach((opt, i) => {
+    rows += wrappedRows(`▶ ${i + 1}. ${t(opt.labelKey)}`, innerWidth);
+  });
+  rows += wrappedRows(t('approval.hint.select'), innerWidth);
+  return 1 + 2 + rows;
 }
 
 /**

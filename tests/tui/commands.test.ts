@@ -77,6 +77,16 @@ describe('SLASH_COMMANDS 注册表', () => {
     expect(busyRoute('plugin', 'disable abc')).toBe('instant');
   });
 
+  it('包含 think 命令：无参查询即时、带参切换排队', () => {
+    const names = SLASH_COMMANDS.map((c) => c.name);
+    expect(names).toContain('think');
+    expect(parseSlash('/think')).toEqual({ name: 'think', args: '' });
+    expect(parseSlash('/think high')).toEqual({ name: 'think', args: 'high' });
+    // 无参只读（busy 时退化为文本展示）→ 即时；带参切换会话级状态 → 排队
+    expect(busyRoute('think', '')).toBe('instant');
+    expect(busyRoute('think', 'high')).toBe('queue');
+  });
+
   it('extraNames 解析 plugin 命名空间命令（<pluginId>:<commandName>）', () => {
     const extra = new Set(['myplugin:review']);
     expect(parseSlash('/myplugin:review a b', extra)).toEqual({ name: 'myplugin:review', args: 'a b' });

@@ -27,13 +27,31 @@ export function LiveViewport({
 }): React.ReactElement {
   const innerRef = useRef<DOMElement>(null);
   const [natural, setNatural] = useState<number | null>(null);
+  // 同一宏任务拍内连续同步测量 dispatch 的计数（级联保险，见下方 effect）。
+  const syncChain = useRef(0);
   // 每次提交同步量一次内容自然高度（流式增长、条目定稿移入 Static 收缩都要追）；
   // 同值不 setState，避免测量触发的二次渲染自我循环。
+  //
+  // 级联保险：本 effect 在 commit 阶段 dispatch，属 React「嵌套更新」。生产流式下
+  // token 更新可能合并进嵌套渲染、每拍又量出新高度再 dispatch，级联自持触顶
+  // React 嵌套上限（50）即整进程闪退（线上实测：Maximum update depth exceeded）。
+  // 对策：同一宏任务拍内计数超过上限就退到下一拍 dispatch——指示行晚一拍出现，
+  // 但同步级联被打断、React 嵌套计数随宏任务边界复位，正常路径行为不变。
   useLayoutEffect(() => {
-    if (innerRef.current !== null) {
-      const { height } = measureElement(innerRef.current);
-      setNatural((prev) => (prev === height ? prev : height));
+    if (innerRef.current === null) return;
+    const { height } = measureElement(innerRef.current);
+    if (syncChain.current >= MAX_SYNC_MEASURE_CHAIN) {
+      setImmediate(() => {
+        syncChain.current = 0;
+        setNatural((prev) => (prev === height ? prev : height));
+      });
+      return;
     }
+    syncChain.current += 1;
+    setImmediate(() => {
+      syncChain.current = 0;
+    });
+    setNatural((prev) => (prev === height ? prev : height));
   });
   const clipping = natural !== null && natural > maxRows;
   // 超预算时让出 1 行给隐藏指示；avail 保底 1 行（极小终端下退化为只显示尾部 1 行 + 指示）。
@@ -53,6 +71,12 @@ export function LiveViewport({
 
 /** 状态栏行数（两行式：徽章行 + hints/context 行，见 StatusBar）。 */
 export const STATUS_BAR_ROWS = 2;
+
+/**
+ * 同一宏任务拍内允许的连续同步测量 dispatch 上限。远低于 React 嵌套更新上限（50），
+ * 给级联中可能并存的其他 commit 阶段 dispatch（spinner、计时器等）留余量。
+ */
+export const MAX_SYNC_MEASURE_CHAIN = 20;
 
 /** 输入区常态行数：round 边框输入框 3 行（上下边框各 1 + 内容 1）+ busy tip / primed 提示 1 行（见 PromptInput）。 */
 export const INPUT_AREA_ROWS = 4;

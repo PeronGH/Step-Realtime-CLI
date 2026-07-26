@@ -362,6 +362,11 @@ function toAsyncIterable(
  * 把 HTTP 非 2xx 响应包成 Anthropic.APIError（按 status 生成对应子类，携带 headers）。
  * 这样 runTurn 的 isRetryableError / isRateLimitError / isContextOverflowError / retryAfterMs
  * 全部零改动生效——它们都基于 `instanceof Anthropic.APIError` 与 status/headers 判断。
+ *
+ * SDK makeMessage 的取信顺序是 error.message（顶层）→ JSON.stringify(error)，传入的 message
+ * 参数在 error 为对象时被忽略。因此这里把可读摘要归一化到 payload 顶层 message：
+ * error.message（OpenAI/Anthropic 标准错误形）→ 顶层 message → 「{type} · {body 截断}」合成摘要。
+ * 裸 body（如 {"type":"error"}，线上实测）不再原样当 message，保证任何输出路径都带得上类型信息。
  */
 export function httpErrorToApiError(status: number, body: string, headers: Headers): Error {
   let parsed: unknown;
@@ -370,13 +375,23 @@ export function httpErrorToApiError(status: number, body: string, headers: Heade
   } catch {
     parsed = undefined;
   }
-  const message =
-    (parsed as { error?: { message?: string } } | undefined)?.error?.message ??
-    (body.length > 0 ? body : `HTTP ${status}`);
-  return Anthropic.APIError.generate(
-    status,
-    parsed as object | undefined,
-    message,
-    headers,
-  );
+  const errObj = parsed as
+    | { error?: { message?: string; type?: string }; message?: string; type?: string }
+    | undefined;
+  const type = errObj?.error?.type ?? errObj?.type;
+  const summary =
+    errObj?.error?.message ??
+    errObj?.message ??
+    (body.length > 0 ? `${type !== undefined ? `${type} · ` : ''}${truncateBody(body)}` : '(no body)');
+  const errorPayload =
+    parsed !== undefined && typeof parsed === 'object'
+      ? { ...parsed, message: summary }
+      : { message: summary };
+  return Anthropic.APIError.generate(status, errorPayload, summary, headers);
+}
+
+/** 错误响应体截断：防止网关/HTML 错误页刷屏。 */
+function truncateBody(body: string, max = 200): string {
+  const flat = body.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }

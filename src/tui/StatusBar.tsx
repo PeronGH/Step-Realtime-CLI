@@ -58,6 +58,7 @@ export function StatusBar({
   mode,
   planMode = false,
   model,
+  thinking,
   busy,
   cwd,
   usedTokens,
@@ -70,6 +71,8 @@ export function StatusBar({
   /** plan 模式开启时优先显示 plan 标签。 */
   planMode?: boolean;
   model: string;
+  /** 思考深度档位标签（如 'high' / 'off'；undefined 不显示）。紧凑缩写不进 i18n（同 bg:N）。 */
+  thinking?: string;
   busy: boolean;
   cwd: string;
   usedTokens: number;
@@ -105,6 +108,12 @@ export function StatusBar({
         <Box flexShrink={0}>
           <Text color="cyan">{model}</Text>
         </Box>
+        {/* 思考深度徽章：档位覆盖生效或 config 默认带 default_level 时由调用方传入；think: 为紧凑缩写不进 i18n */}
+        {thinking !== undefined ? (
+          <Box flexShrink={0}>
+            <Text color="gray">{` · think:${thinking}`}</Text>
+          </Box>
+        ) : null}
         <Box flexShrink={0}>
           <Text color="gray">{'  '}</Text>
         </Box>

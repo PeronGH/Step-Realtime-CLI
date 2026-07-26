@@ -12,8 +12,35 @@ import {
   RETRY_BASE_MS,
   RETRY_MAX_MS,
   retryAfterMs,
+  summarizeError,
   withRetry,
 } from '../../src/provider/retry.js';
+
+describe('summarizeError', () => {
+  it('裸 JSON body（{"type":"error"} 现场）→ 剥状态码前缀，保 type 信息', () => {
+    const err = Anthropic.APIError.generate(400, { type: 'error' }, '{"type":"error"}', new Headers());
+    expect(summarizeError(err)).toBe('HTTP 400 · {"type":"error"}');
+  });
+
+  it('标准错误形 → type: message 可读摘要', () => {
+    const err = Anthropic.APIError.generate(
+      400,
+      { error: { type: 'invalid_request_error', message: 'prompt is too long' } },
+      'prompt is too long',
+      new Headers(),
+    );
+    expect(summarizeError(err)).toBe('HTTP 400 · invalid_request_error: prompt is too long');
+  });
+
+  it('普通 Error（非 APIError）→ 原文返回，不加状态码', () => {
+    expect(summarizeError(new Error('boom'))).toBe('boom');
+  });
+
+  it('SDK 已带状态码前缀 → 剥掉后统一成 HTTP {status} · 形式', () => {
+    const err = Anthropic.APIError.generate(429, { message: 'rate limited' }, undefined, new Headers());
+    expect(summarizeError(err)).toBe('HTTP 429 · rate limited');
+  });
+});
 
 describe('isRetryableError', () => {
   it('网络连接错误可重试', () => {

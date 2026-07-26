@@ -53,6 +53,8 @@ export class OpenAiChatProvider implements ChatProvider {
     messages: Anthropic.MessageParam[];
     signal?: AbortSignal;
     model?: string;
+    /** thinking 覆盖：openai 协议无 thinking 请求字段，忽略此参数（仅为对齐 ChatProvider 签名）。 */
+    thinking?: { budgetTokens?: number } | null;
   }): ReturnType<Anthropic['messages']['stream']> {
     const model = params.model ?? this.model;
     const body: Record<string, unknown> = {
