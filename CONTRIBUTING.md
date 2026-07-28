@@ -50,7 +50,7 @@ pnpm run test
 - **PR 描述必须关联一个 issue**，用 `Closes #N`、`Fixes #N` 或 `Refs #N`。这条由 `pr-lint` 工作流强制校验，不满足会失败。若确无对应 issue，仓库 owner 可加 `skip-issue-link` label 放行。
 - 新功能或 bug 修复请配套加测试。
 - 提交信息用简洁的祈使句，标注类型前缀（`feat` / `fix` / `docs` / `refactor` / `test` / `chore`）。
-- 平台相关代码不要硬编码 platform 判断，跨平台路径用 `node:path`。
+- 跨平台路径用 `node:path` 的 `win32` / `posix` 命名空间显式拼接，禁止用默认 `join` 处理 Windows 路径（默认 `join` 在 POSIX 上会把反斜杠当普通字符，导致 mock `process.platform='win32'` 的测试失败）；平台判断避免硬编码。
 - 不要提交构建产物（`dist/`）或密钥（`.env`）。
 
 ## 报告问题
