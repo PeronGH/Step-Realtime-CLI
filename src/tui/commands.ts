@@ -29,6 +29,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'lang', describe: 'cmd.lang' },
   { name: 'mcp', describe: 'cmd.mcp' },
   { name: 'skill', describe: 'cmd.skill' },
+  { name: 'reload', describe: 'cmd.reload' },
   { name: 'plugin', describe: 'cmd.plugin' },
   { name: 'exit', aliases: ['quit', 'q'], describe: 'cmd.exit' },
 ];

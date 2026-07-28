@@ -18,11 +18,12 @@ import { CronScheduler } from '../agent/cron/scheduler.js';
 import { CronJobStore } from '../agent/cron/store.js';
 import { createSubagentRunner } from '../agent/subagent/runner.js';
 import { renderSkillActivation, skillListing, type SkillRegistry, type SkillRegistryDiff } from '../skill/registry.js';
-import type { CompactionConfig, StepCodeConfig, SubagentLimits } from '../config/config.js';
+import type { StepCodeConfig } from '../config/config.js';
 import { PROVIDER_PRESETS, resolveModelEntry, saveDefaultModel, saveLanguage } from '../config/config.js';
 import { getLocale, setLocale, t, type Locale } from '../i18n.js';
 import { createProvider } from '../provider/factory.js';
 import type { ChatProvider } from '../provider/types.js';
+import { diffConfig, formatConfigChange, planProviderReload } from './reload.js';
 import type { ToolContext } from '../tools/types.js';
 import type { TodoItem } from '../tools/types.js';
 import { clearDynamicTools } from '../tools/index.js';
@@ -98,18 +99,19 @@ export interface AppProps {
   reloadSkills: (force?: boolean) => SkillRegistryDiff | null;
   ctx: ToolContext;
   model: string;
-  /** 完整配置快照，供运行时 /provider 重建 provider 实例。 */
+  /** 初始配置快照：挂载时各一次性构造（modelLabel/providerName/BackgroundManager 等）读它；
+   * 运行期的逐轮读取全部走 configRef（/reload 热重载后换引用）。 */
   config: StepCodeConfig;
   initialMode: PermissionMode;
   store: SessionStore;
   session: SessionData;
   maxContextSize: number;
-  subagent: SubagentLimits;
-  compaction: CompactionConfig;
   /** MCP 连接管理器（组合根注入，供 /mcp 状态面板查询）。缺失表示未配置 MCP。 */
   mcp?: McpManager;
-  /** 用户可配置 hooks 引擎（组合根注入）。缺失表示未配置 [[hooks]]。 */
-  hookEngine?: HookEngine;
+  /** 用户可配置 hooks 引擎持有者（组合根注入，对齐 skillsRef）：/reload 后整体换引用。 */
+  hookEngineRef: { current: HookEngine | undefined };
+  /** /reload 的 main 侧入口：重跑 loadConfig 并换 main 侧引用；失败返回 error 且不落任何变更。 */
+  reloadConfig: () => { config: StepCodeConfig } | { error: string };
   /** plugin 贡献的命令模板（组合根注入，name 已带 <pluginId>: 命名空间前缀）。 */
   pluginCommands?: PluginCommand[];
   /** 退出（/exit、Ctrl+C 等触发 unmount）时上抛当前会话信息，供 main 打印 resume 提示。 */
@@ -131,10 +133,9 @@ export function App({
   store,
   session,
   maxContextSize: initialMaxContextSize,
-  subagent,
-  compaction,
   mcp,
-  hookEngine,
+  hookEngineRef,
+  reloadConfig,
   pluginCommands,
   onExitInfo,
 }: AppProps): React.ReactElement {
@@ -222,6 +223,15 @@ export function App({
   // config.toml 顶层 `model` 的当前值（默认模型指针）：/model 切换时写回并同步此 ref，
   // 供幂等判定（相等则不重复写文件）。启动值取 config.model。
   const defaultModelPointerRef = useRef(config.model);
+  // 运行时配置持有者：/reload 热重载后整体换引用（对齐 skillsRef/providerRef 模式）。
+  // 逐轮现取派读取点（submit/runAgent 参数组装、/model /think /provider 各 case、选择器候选、
+  // settle 回调的 background 开关）全部经 configRef.current 取，下一轮请求即按新配置生效。
+  const configRef = useRef(config);
+  // 当前模型的别名绑定：/model 别名切换成功记别名、裸 id 切换置 null（/provider 切换亦置 null——
+  // 别名绑定已断）；/resume 经 applyModelAlias 反查路径同步维护。/reload 据此决定 provider 重建策略。
+  const currentModelAliasRef = useRef<string | null>(
+    Object.keys(config.models ?? {}).find((a) => (config.models?.[a]?.model ?? a) === initialModel) ?? null,
+  );
   // plan 模式的 ref（权限守卫与 /plan 切换读它）：与 planMode state 同源于会话快照，
   // 否则恢复会话时 UI 显示 plan 而守卫仍按非 plan 放行工具。
   const planModeRef = useRef(session.planMode ?? false);
@@ -469,14 +479,15 @@ export function App({
   }, [agentsMdTruncated, agentsMdMaxBytes, pushItem]);
 
   // SessionStart hook：会话创建/恢复后触发一次，stdout 注入会话上下文（拼进后续 runAgent 的 system 尾部）；
-  // hook 执行可见性 notice 挂到转录区 note 条目
+  // hook 执行可见性 notice 挂到转录区 note 条目。挂载时读一次引擎（/reload 是否重跑 SessionStart 列入设计待确认，本轮不做）
   useEffect(() => {
-    if (hookEngine === undefined) return;
-    hookEngine.setNoticeSink((m) => pushItem({ kind: 'note', text: m }));
-    void hookEngine.run('SessionStart', {}).then((r) => {
+    const engine = hookEngineRef.current;
+    if (engine === undefined) return;
+    engine.setNoticeSink((m) => pushItem({ kind: 'note', text: m }));
+    void engine.run('SessionStart', {}).then((r) => {
       if (r.stdout !== '') sessionContextRef.current = r.stdout;
     });
-  }, [hookEngine, pushItem]);
+  }, [hookEngineRef, pushItem]);
 
   // goal 视图快照（状态栏徽标数据源）与墙钟：onChange 同步快照并打生命周期 marker；active 时每 15s 跳一次用时
   const [goalView, setGoalView] = useState<GoalState | null>(goal.current.get());
@@ -976,10 +987,11 @@ export function App({
       };
       // 用户 hooks 叠加在既有 LoopHooks 之上（接口不动）：PreToolUse 链首 deny-only、
       // PostToolUse fire-and-forget、Stop exit 2 时返回续接描述（一次性防循环标志，统一走 continuation 事件）
-      if (hookEngine === undefined) return base;
-      return composeLoopHooks(hookEngine, base);
+      const engine = hookEngineRef.current;
+      if (engine === undefined) return base;
+      return composeLoopHooks(engine, base);
     },
-    [askApproval, askPlanApproval, changeMode, hookEngine, setPlanModeBoth],
+    [askApproval, askPlanApproval, changeMode, hookEngineRef, setPlanModeBoth],
   );
 
   /**
@@ -1003,8 +1015,10 @@ export function App({
           pushItem({ kind: 'note', text: t('app.model.persistFailed', { message: (e as Error).message }) });
         }
       };
-      const resolved = resolveModelEntry(config, arg);
+      const resolved = resolveModelEntry(configRef.current, arg);
       if (resolved === null) {
+        // 裸 id 直切：无别名绑定，/reload 的 provider 重建按新顶层配置决策
+        currentModelAliasRef.current = null;
         setModel(arg);
         modelRef.current = arg;
         setModelLabel(arg);
@@ -1020,10 +1034,12 @@ export function App({
         pushItem({ kind: 'error', text: t('app.model.switchFailed', { message: (e as Error).message }) });
         return;
       }
+      // 别名切换成功：记录别名绑定，/reload 时按「别名仍在/被删」决策 provider 重建
+      currentModelAliasRef.current = arg;
       providerNameRef.current = resolved.provider;
       setModel(resolved.model);
       modelRef.current = resolved.model;
-      setModelLabel(config.models?.[arg]?.displayName ?? resolved.model);
+      setModelLabel(configRef.current.models?.[arg]?.displayName ?? resolved.model);
       setMaxContextSize(resolved.maxContextSize);
       // 模型是会话级状态：切换即落盘（写会话 model 字段），恢复会话时读回并重建 provider
       sessionRef.current.model = resolved.model;
@@ -1031,7 +1047,7 @@ export function App({
       persistPointer();
       pushItem({ kind: 'note', text: t('app.model.aliasSwitched', { name: arg, model: resolved.model }) });
     },
-    [config, persist, pushItem],
+    [persist, pushItem],
   );
 
   /**
@@ -1061,8 +1077,8 @@ export function App({
       // 恢复会话级模型：按存储的 model 重建 provider（applyModelAlias 内含 setModel + createProvider + 落盘）。
       // model 存的是解析后的真实 id，用它反查别名；找不到别名则按 id 直切。
       if (data.model !== '' && data.model !== modelRef.current) {
-        const alias = Object.keys(config.models ?? {}).find(
-          (a) => (config.models?.[a]?.model ?? a) === data.model,
+        const alias = Object.keys(configRef.current.models ?? {}).find(
+          (a) => (configRef.current.models?.[a]?.model ?? a) === data.model,
         );
         applyModelAlias(alias ?? data.model, { persistDefault: false });
       }
@@ -1105,7 +1121,7 @@ export function App({
       setSessionEpoch((e) => e + 1);
       return true;
     },
-    [applyModelAlias, changeMode, config, ctx.cwd, persist, pushItem, setPlanModeBoth, setThinkOverrideBoth],
+    [applyModelAlias, changeMode, ctx.cwd, persist, pushItem, setPlanModeBoth, setThinkOverrideBoth],
   );
 
   /**
@@ -1119,7 +1135,7 @@ export function App({
       setThinkOverrideBoth(name);
       // 思考档位是会话级状态：切换即落盘，恢复会话时读回（与 /model、/permission 同口径）
       persist();
-      const levels = thinkLevelsOf(config.thinking);
+      const levels = thinkLevelsOf(configRef.current.thinking);
       pushItem({
         kind: 'note',
         text: t('app.think.switched', {
@@ -1129,18 +1145,18 @@ export function App({
       });
       // 余量防线：切到的档位在当前 max_tokens 下正文余量不足时给 warning（不硬拦，尊重用户）。
       // 运行时切档不走 config 解析期校验，这里是唯一拦截点；不提示的话会静默发出→空响应。
-      const safety = thinkBudgetSafety(name, levels, config.maxTokens);
+      const safety = thinkBudgetSafety(name, levels, configRef.current.maxTokens);
       if (!safety.safe) {
         pushItem({
           kind: 'note',
-          text: t('app.think.budgetWarning', { budget: safety.budget, maxTokens: config.maxTokens }),
+          text: t('app.think.budgetWarning', { budget: safety.budget, maxTokens: configRef.current.maxTokens }),
         });
       }
       if (history.current.length > 0) {
         pushItem({ kind: 'note', text: t('app.think.cacheWarning') });
       }
     },
-    [config, persist, pushItem, setThinkOverrideBoth],
+    [persist, pushItem, setThinkOverrideBoth],
   );
 
   /** 处理斜杠命令。返回 true 表示已作为命令消费。 */
@@ -1156,7 +1172,7 @@ export function App({
         case 'model': {
           const arg = args.trim();
           if (arg === '') {
-            const aliases = Object.keys(config.models ?? {});
+            const aliases = Object.keys(configRef.current.models ?? {});
             if (aliases.length === 0) {
               pushItem({ kind: 'note', text: t('app.model.current', { model }) });
               break;
@@ -1174,9 +1190,9 @@ export function App({
           break;
         }
         case 'think': {
-          const levels = thinkLevelsOf(config.thinking);
+          const levels = thinkLevelsOf(configRef.current.thinking);
           // 门控：非 anthropic 协议或未允许发送 thinking 字段时不可用（只提示，不切换）
-          if (!thinkingAvailable(providerNameRef.current, config.thinking)) {
+          if (!thinkingAvailable(providerNameRef.current, configRef.current.thinking)) {
             pushItem({ kind: 'note', text: t('app.think.unavailable') });
             break;
           }
@@ -1207,7 +1223,7 @@ export function App({
               kind: 'note',
               text: t('app.think.status', {
                 current,
-                defaultLevel: config.thinking?.defaultLevel ?? t('app.think.noDefault'),
+                defaultLevel: configRef.current.thinking?.defaultLevel ?? t('app.think.noDefault'),
                 lines,
               }),
             });
@@ -1246,7 +1262,7 @@ export function App({
           const arg = args.trim().toLowerCase();
           const available = Object.keys(PROVIDER_PRESETS).join(' / ');
           if (arg === '') {
-            pushItem({ kind: 'note', text: t('app.provider.current', { provider: config.provider, list: available }) });
+            pushItem({ kind: 'note', text: t('app.provider.current', { provider: configRef.current.provider, list: available }) });
             break;
           }
           const preset = PROVIDER_PRESETS[arg];
@@ -1257,15 +1273,17 @@ export function App({
           const nextModel = preset.model ?? model;
           try {
             providerRef.current = createProvider({
-              ...config,
+              ...configRef.current,
               provider: arg,
-              baseUrl: preset.baseUrl ?? config.baseUrl,
+              baseUrl: preset.baseUrl ?? configRef.current.baseUrl,
               model: nextModel,
             });
           } catch (e) {
             pushItem({ kind: 'error', text: t('app.provider.switchFailed', { message: (e as Error).message }) });
             break;
           }
+          // provider 按预设重建后不再代表别名绑定（渠道/模型都可能变），断开别名记录
+          currentModelAliasRef.current = null;
           providerNameRef.current = arg;
           setModel(nextModel);
           const modelNote =
@@ -1435,10 +1453,10 @@ export function App({
                 history.current,
                 6,
                 todos.current,
-                compaction.model,
+                configRef.current.compaction.model,
                 {
-                  maxTokens: compaction.userMessageMaxTokens,
-                  headTokens: compaction.userMessageHeadTokens,
+                  maxTokens: configRef.current.compaction.userMessageMaxTokens,
+                  headTokens: configRef.current.compaction.userMessageHeadTokens,
                 },
               );
               // 压缩是 undo 水位线：被吞掉的轮对应的快照已无意义，清栈（幸存 recent 轮的撤销退化为只回退 history）
@@ -1595,6 +1613,62 @@ export function App({
           skillInjectRef.current?.(renderSkillActivation(def, skillArgs));
           break;
         }
+        case 'reload': {
+          // main 侧薄壳：重跑 loadConfig（同启动 overrides）→ 换模块级 config/ctx/hookEngine 引用；
+          // 失败原子性在 main 侧保证（抛错则一步不落，旧配置整体保留），这里只报错
+          const prev = configRef.current;
+          const result = reloadConfig();
+          if ('error' in result) {
+            pushItem({ kind: 'error', text: t('app.reload.failed', { message: result.error }) });
+            break;
+          }
+          const next = result.config;
+          configRef.current = next;
+          // provider 重建决策（设计 3.3 四路）：别名仍在→按新 resolved 重建；别名被删/无法解析/重建失败→沿用旧 provider
+          const plan = planProviderReload(prev, next, modelRef.current, currentModelAliasRef.current);
+          let providerNote = '';
+          if (plan.kind === 'rebuild') {
+            providerRef.current = plan.provider;
+            providerNameRef.current = plan.providerName;
+            // 别名指向的真实 id 可能随配置改动：模型是会话级状态，跟随落盘（照 applyModelAlias 清单）
+            if (plan.model !== modelRef.current) {
+              setModel(plan.model);
+              modelRef.current = plan.model;
+              sessionRef.current.model = plan.model;
+              persist();
+            }
+            setModelLabel(plan.modelLabel);
+            setMaxContextSize(plan.maxContextSize);
+            providerNote = t('app.reload.providerRebuilt');
+          } else if (plan.reason === 'aliasRemoved') {
+            providerNote = t('app.reload.aliasRemoved', { alias: plan.alias ?? '' });
+          } else if (plan.reason === 'aliasInvalid') {
+            providerNote = t('app.reload.aliasInvalid', { alias: plan.alias ?? '' });
+          } else if (plan.reason === 'buildFailed') {
+            providerNote = t('app.reload.providerFailed', { message: plan.message ?? '' });
+          }
+          // language 变化走 /lang 同一路径（setLocale + setLang 触发整树重渲）；
+          // 不写回 config.toml——变更本就来自它。先切语言再打反馈，反馈文案用新语言
+          const nextLang = next.language ?? 'zh';
+          if (nextLang !== getLocale()) {
+            setLocale(nextLang);
+            setLang(nextLang);
+          }
+          // 新 hookEngine 补挂 notice 出口（重建换引用后原 sink 丢失，hook 执行可见性 notice 会静默丢）
+          hookEngineRef.current?.setNoticeSink((m) => pushItem({ kind: 'note', text: m }));
+          // diff 反馈（对齐 /skill reload 的清单形态）；restart 标记的字段追加「需重启生效」
+          const changes = diffConfig(prev, next);
+          if (changes.length === 0 && providerNote === '') {
+            pushItem({ kind: 'note', text: t('app.reload.noChange') });
+          } else {
+            const lines = changes.map(
+              (c) => formatConfigChange(c) + (c.restart === true ? t('app.reload.restartSuffix') : ''),
+            );
+            if (providerNote !== '') lines.push(providerNote);
+            pushItem({ kind: 'note', text: t('app.reload.done', { changes: lines.join('\n') }) });
+          }
+          break;
+        }
         case 'exit':
           exit();
           break;
@@ -1619,7 +1693,7 @@ export function App({
       }
       return true;
     },
-    [applyModelAlias, applyThinkLevel, changeMode, compaction, config, ctx.cwd, exit, mcp, model, performUndo, persist, pluginCommandMap, pluginCommandNames, pushItem, reloadSkills, setPlanModeBoth, skillConflictNote, skillsRef, store, thinkOverride],
+    [applyModelAlias, applyThinkLevel, changeMode, ctx.cwd, exit, mcp, model, performUndo, persist, pluginCommandMap, pluginCommandNames, pushItem, reloadConfig, reloadSkills, setPlanModeBoth, skillConflictNote, skillsRef, store, thinkOverride],
   );
 
   const submit = useCallback(
@@ -1677,6 +1751,7 @@ export function App({
       });
 
       // UserPromptSubmit hook：stdout 非空作为上下文注入本轮；exit 2 阻断本轮不发模型（输入退回输入框）
+      const hookEngine = hookEngineRef.current;
       if (hookEngine !== undefined && !opts?.silent) {
         const up = await hookEngine.run('UserPromptSubmit', { prompt: text });
         if (up.blocked) {
@@ -1727,18 +1802,18 @@ export function App({
         apiKey: ctx.apiKey,
         baseUrl: ctx.baseUrl,
         hooks,
-        maxDepth: subagent.maxDepth,
-        maxPerSession: subagent.maxPerSession,
-        maxStepsDefault: subagent.maxSteps,
+        maxDepth: configRef.current.subagent.maxDepth,
+        maxPerSession: configRef.current.subagent.maxPerSession,
+        maxStepsDefault: configRef.current.subagent.maxSteps,
         compaction: {
           maxContextSize,
-          triggerRatio: compaction.triggerRatio,
-          reservedTokens: compaction.reservedTokens,
+          triggerRatio: configRef.current.compaction.triggerRatio,
+          reservedTokens: configRef.current.compaction.reservedTokens,
         },
-        compactionModel: compaction.model,
+        compactionModel: configRef.current.compaction.model,
         userMessageBudget: {
-          maxTokens: compaction.userMessageMaxTokens,
-          headTokens: compaction.userMessageHeadTokens,
+          maxTokens: configRef.current.compaction.userMessageMaxTokens,
+          headTokens: configRef.current.compaction.userMessageHeadTokens,
         },
         sessionCounter: subagentCounter.current,
         skills: skillsRef.current, // 子 agent 共享 skill（取当前注册表，支持 reload 后即时生效）
@@ -1799,7 +1874,7 @@ export function App({
             goal: goal.current,
             cron: cron.current ?? undefined,
             askUser: askUserQuestion,
-            subagentMaxConcurrent: subagent.maxConcurrent,
+            subagentMaxConcurrent: configRef.current.subagent.maxConcurrent,
             // workflow 步骤进度：推进最近一个运行中的 workflow 工具条目的步骤面板
             onWorkflowStep: (info) => {
               const toolId = activeWorkflowRef.current[activeWorkflowRef.current.length - 1];
@@ -1818,16 +1893,16 @@ export function App({
           hooks,
           model,
           // 会话级思考深度覆盖（/think）：undefined 跟随构造默认，'off' → null 抑制，档位 → budget 覆盖
-          thinking: thinkStreamParam(thinkOverride, thinkLevelsOf(config.thinking)),
+          thinking: thinkStreamParam(thinkOverride, thinkLevelsOf(configRef.current.thinking)),
           compaction: {
             maxContextSize,
-            triggerRatio: compaction.triggerRatio,
-            reservedTokens: compaction.reservedTokens,
+            triggerRatio: configRef.current.compaction.triggerRatio,
+            reservedTokens: configRef.current.compaction.reservedTokens,
           },
-          compactionModel: compaction.model,
+          compactionModel: configRef.current.compaction.model,
           userMessageBudget: {
-            maxTokens: compaction.userMessageMaxTokens,
-            headTokens: compaction.userMessageHeadTokens,
+            maxTokens: configRef.current.compaction.userMessageMaxTokens,
+            headTokens: configRef.current.compaction.userMessageHeadTokens,
           },
           todos: todos.current,
           // 后台任务终态通知：busy 中在 runAgent 每个回合边界 flush 进 messages（不等循环结束）
@@ -1885,7 +1960,7 @@ export function App({
         }
       }
     },
-    [agentsMd, applyEvent, askUserQuestion, buildHooks, compaction, ctx, handleSlash, hookEngine, maxContextSize, model, persist, pluginCommandNames, pushItem, reloadSkills, skillConflictNote, skillsRef, subagent, systemPrefix, thinkOverride],
+    [agentsMd, applyEvent, askUserQuestion, buildHooks, ctx, handleSlash, hookEngineRef, maxContextSize, model, persist, pluginCommandNames, pushItem, reloadSkills, skillConflictNote, skillsRef, systemPrefix, thinkOverride],
   );
 
   // cron 触发时把 prompt 静默注入跑一轮（不记输入历史、不显示 user 条目，转录区只留触发卡片）
@@ -1912,11 +1987,11 @@ export function App({
       }),
     });
     // 终端通知（铃响/桌面通知）：独立于 notifyOnComplete，用户切走终端也能感知。
-    if (config.background?.notifyTerminal !== false) {
+    if (configRef.current.background?.notifyTerminal !== false) {
       const statusLabel = t(`background.status.${task.status}`);
       emitTerminalNotification(`后台任务 ${task.id} ${statusLabel}：${task.command}`);
     }
-    if (config.background?.notifyOnComplete === false) {
+    if (configRef.current.background?.notifyOnComplete === false) {
       background.current.drainSettled();
       return;
     }
@@ -1935,20 +2010,20 @@ export function App({
   const settledCount = countSettledItems(items, busy);
   // 模型选择器候选清单：左列 displayName ?? 别名，右列渠道名（entry.provider ?? 顶层 provider），
   // 当前项按「别名解析出的真实 id === 当前 model」判定（与 /model 切换后的 model state 对齐）。
-  const modelPickerItems: ModelPickerItem[] = Object.entries(config.models ?? {}).map(([alias, entry]) => ({
+  const modelPickerItems: ModelPickerItem[] = Object.entries(configRef.current.models ?? {}).map(([alias, entry]) => ({
     alias,
     label: entry.displayName ?? alias,
-    channel: entry.provider ?? config.provider,
+    channel: entry.provider ?? configRef.current.provider,
     current: (entry.model ?? alias) === model,
   }));
   // 思考深度选择器候选清单：档位表各档（右列 budget）+ 尾部 off 项；
   // 当前项按会话覆盖判定（无覆盖时命中 config 默认档位算当前）。
-  const thinkLevels = thinkLevelsOf(config.thinking);
+  const thinkLevels = thinkLevelsOf(configRef.current.thinking);
   const thinkPickerItems: ThinkPickerItem[] = [
     ...Object.entries(thinkLevels).map(([name, budget]) => ({
       name,
       detail: t('thinkPicker.budget', { budget }),
-      current: thinkOverride === undefined ? name === config.thinking?.defaultLevel : name === thinkOverride,
+      current: thinkOverride === undefined ? name === configRef.current.thinking?.defaultLevel : name === thinkOverride,
     })),
     { name: 'off', detail: t('thinkPicker.offDetail'), current: thinkOverride === 'off' },
   ];
@@ -2228,8 +2303,8 @@ export function App({
         planMode={planMode}
         model={modelLabel}
         thinking={
-          thinkingAvailable(providerNameRef.current, config.thinking)
-            ? thinkStatusLabel(thinkOverride, config.thinking)
+          thinkingAvailable(providerNameRef.current, configRef.current.thinking)
+            ? thinkStatusLabel(thinkOverride, configRef.current.thinking)
             : undefined
         }
         busy={busy}

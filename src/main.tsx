@@ -317,8 +317,35 @@ if (session.model !== '' && session.model !== config.model) {
 // 用户可配置 hooks（~/.step-code/config.toml [[hooks]]）+ plugin 声明的 hooks：全局唯一引擎，
 // PreToolUse/PostToolUse/Stop 叠加在 LoopHooks 之上（接口不动），UserPromptSubmit/SessionStart 在提交/启动点触发。
 // plugin hook 的 cwd 已固定为插件根并注入 STEP_CODE_PLUGIN_ROOT（加载时在 manifest 解析层完成）。
+// hookEngineRef 持有当前引擎：/reload 热重载后按新 [[hooks]] 整体换引用（对齐 skillsRef 模式），
+// 引擎构造廉价（纯数据装配，无连接），运行中的 turn 不受影响（hooks 按轮组装）。
 const hookEntries = [...(config.hooks ?? []), ...plugins.flatMap((p) => p.hooks)];
-const hookEngine = hookEntries.length > 0 ? new HookEngine(hookEntries, { sessionId: session.id, cwd }) : undefined;
+const hookEngineRef: { current: HookEngine | undefined } = {
+  current: hookEntries.length > 0 ? new HookEngine(hookEntries, { sessionId: session.id, cwd }) : undefined,
+};
+
+/**
+ * /reload 的 main 侧薄壳：重跑 loadConfig（同启动 overrides，CLI --model/--provider 仍最高优先）→
+ * 重赋值模块级 config（reloadSkills 闭包读它，extra_skill_dirs/disabled_skills 随下次重扫间接生效）→
+ * 更新 ctx 字段 → 重建 hookEngine 换引用。
+ * 失败原子性：loadConfig 抛错时一步都不落，返回 error，旧配置整体保留。
+ * 热应用决策（provider 重建、派生 state 同步、diff 反馈）全部在 App 的 case 'reload' 完成。
+ */
+const reloadConfig = (): { config: StepCodeConfig } | { error: string } => {
+  let next: StepCodeConfig;
+  try {
+    next = loadConfig(cwd, { provider: opts.provider, model: opts.model });
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  config = next;
+  ctx.apiKey = next.apiKey;
+  ctx.baseUrl = next.baseUrl;
+  ctx.bashAutoBackgroundOnTimeout = next.background?.bashAutoBackgroundOnTimeout ?? true;
+  const entries = [...(next.hooks ?? []), ...plugins.flatMap((p) => p.hooks)];
+  hookEngineRef.current = entries.length > 0 ? new HookEngine(entries, { sessionId: session.id, cwd }) : undefined;
+  return { config: next };
+};
 
 /**
  * 非交互模式的权限钩子：能自动放行则放行；需确认（'ask'）时因无 TTY 可交互而拒绝，
@@ -336,8 +363,9 @@ function nonInteractiveHooks(): LoopHooks {
     },
   };
   // 用户 hooks 叠加在权限判定之上：PreToolUse 链首 deny-only、PostToolUse fire-and-forget、Stop 一次性续行
-  if (hookEngine === undefined) return base;
-  return composeLoopHooks(hookEngine, base);
+  const engine = hookEngineRef.current;
+  if (engine === undefined) return base;
+  return composeLoopHooks(engine, base);
 }
 
 /** 非交互模式：跑一轮 agent。text 格式下 assistant 走 stdout、其余走 stderr；stream-json 下每个事件一行 JSON 到 stdout。 */
@@ -346,6 +374,7 @@ async function runPrint(prompt: string): Promise<void> {
 
   // 用户 hooks：notice 走 stderr（与 agent 循环 notice 同一出口）
   let hookContext = '';
+  const hookEngine = hookEngineRef.current;
   if (hookEngine !== undefined) {
     hookEngine.setNoticeSink((m) => process.stderr.write(`\n[notice] ${m}\n`));
     // SessionStart：会话创建/恢复后触发一次，stdout 注入会话上下文（拼进本轮 system 尾部）
@@ -571,10 +600,9 @@ if (opts.reflect === true) {
       store={store}
       session={session}
       maxContextSize={sessionMaxContextSize}
-      subagent={config.subagent}
-      compaction={config.compaction}
       mcp={mcpManager}
-      hookEngine={hookEngine}
+      hookEngineRef={hookEngineRef}
+      reloadConfig={reloadConfig}
       pluginCommands={plugins.flatMap((p) => p.commands)}
       onExitInfo={(id, hasContent) => {
         exitInfo = { id, hasContent };

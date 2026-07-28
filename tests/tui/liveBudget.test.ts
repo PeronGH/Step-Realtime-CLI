@@ -110,8 +110,8 @@ describe('matchSlashCommands 斜杠命令匹配', () => {
     expect(matchSlashCommands('/cp').map((c) => c.name)).toEqual(['compact', 'mcp']);
     // se → resume（子序列匹配 sessions 别名：s→e）
     expect(matchSlashCommands('/se').map((c) => c.name)).toEqual(['resume']);
-    // re → reflect（前缀）、resume（前缀），provider 的 e 在位置 6 超出跨度限制
-    expect(matchSlashCommands('/re').map((c) => c.name)).toEqual(['reflect', 'resume']);
+    // re → reflect（前缀）、resume（前缀）、reload（前缀），provider 的 e 在位置 6 超出跨度限制
+    expect(matchSlashCommands('/re').map((c) => c.name)).toEqual(['reflect', 'resume', 'reload']);
     // pl → plan（前缀）、plugin（前缀），两个都前缀命中按注册序
     expect(matchSlashCommands('/pl').map((c) => c.name)).toEqual(['plan', 'plugin']);
   });

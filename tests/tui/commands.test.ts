@@ -45,6 +45,10 @@ describe('parseSlash', () => {
     expect(parseSlash('/undo 3')).toEqual({ name: 'undo', args: '3' });
     expect(parseSlash('/undo')).toEqual({ name: 'undo', args: '' });
   });
+
+  it('解析 /reload 命令（无参）', () => {
+    expect(parseSlash('/reload')).toEqual({ name: 'reload', args: '' });
+  });
 });
 
 describe('SLASH_COMMANDS 注册表', () => {
@@ -131,12 +135,14 @@ describe('busyRoute', () => {
   });
 
   it('改动 turn 前提的命令 busy 时排队', () => {
-    for (const name of ['yolo', 'auto', 'plan', 'fork', 'new', 'compact', 'undo', 'reflect', 'export-debug-zip', 'resume', 'exit']) {
+    for (const name of ['yolo', 'auto', 'plan', 'fork', 'new', 'compact', 'undo', 'reflect', 'export-debug-zip', 'resume', 'reload', 'exit']) {
       expect(busyRoute(name, '')).toBe('queue');
     }
     expect(busyRoute('resume', 'abc')).toBe('queue');
     // undo 带参无参都是状态变更（回退历史与附带状态），一律排队到回合边界
     expect(busyRoute('undo', '3')).toBe('queue');
+    // reload 重建 provider、改 ctx、换 hookEngine——全部是在途 turn 依赖的运行时前提，排队到回合边界
+    expect(busyRoute('reload', '')).toBe('queue');
   });
 
   it('未知命令即时提示，不等回合结束', () => {

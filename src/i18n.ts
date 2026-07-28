@@ -294,6 +294,16 @@ const zh = {
   'app.agentsMd.dropped.line': '{path}（原始 {original} KB，预算耗尽，整篇未注入）',
   'app.agent.activityError': '错误:{message}',
 
+  // --- /reload 配置热重载反馈 ---
+  'app.reload.done': '配置已热重载：\n{changes}',
+  'app.reload.noChange': '配置无变化（已重新读取 config.toml）。',
+  'app.reload.failed': '配置重载失败：{message}。旧配置继续生效，未落任何变更。',
+  'app.reload.providerRebuilt': 'provider 已重建（下一轮请求生效）。',
+  'app.reload.providerFailed': 'provider 重建失败：{message}。本会话沿用旧 provider，其余配置项已生效。',
+  'app.reload.aliasRemoved': '当前会话模型别名「{alias}」已在新配置中删除，本会话沿用旧 provider；/model 切换或重启后生效。',
+  'app.reload.aliasInvalid': '当前会话模型别名「{alias}」在新配置中无法解析（provider 指向无效渠道），本会话沿用旧 provider。',
+  'app.reload.restartSuffix': '（需重启生效）',
+
   // --- App /plugin 管理命令与 plugin 命名空间命令 ---
   'app.plugin.usage': '用法：/plugin [list] · /plugin install <本地目录> · /plugin enable <id> · /plugin disable <id> · /plugin remove <id> · /plugin info <id>',
   'app.plugin.list.empty': '暂无已安装的 plugin。用 /plugin install <本地目录> 安装。',
@@ -337,6 +347,7 @@ const zh = {
   'cmd.lang': '显示或切换界面语言：/lang [zh|en]',
   'cmd.mcp': '查看 MCP server 连接状态与工具数',
   'cmd.skill': '激活技能或列出可用技能：/skill [名称] [参数]；/skill reload 强制重扫技能目录',
+  'cmd.reload': '热重载 config.toml 配置（不重启进程，会话与历史保留）',
   'cmd.plugin': '管理 plugin：/plugin [list|install|enable|disable|remove|info]',
   'cmd.exit': '退出 Step Code',
   'cmd.helpText.aliasSuffix': '（/{aliases}）',
@@ -641,6 +652,16 @@ const en: Record<keyof typeof zh, string> = {
   'app.agentsMd.dropped.line': '{path} (original {original} KB, budget exhausted, entirely skipped)',
   'app.agent.activityError': 'error:{message}',
 
+  // --- /reload config hot-reload feedback ---
+  'app.reload.done': 'Config hot-reloaded:\n{changes}',
+  'app.reload.noChange': 'No config changes (config.toml re-read).',
+  'app.reload.failed': 'Config reload failed: {message}. Previous config stays in effect; nothing was applied.',
+  'app.reload.providerRebuilt': 'Provider rebuilt (takes effect next turn).',
+  'app.reload.providerFailed': 'Provider rebuild failed: {message}. Keeping the previous provider; other config items applied.',
+  'app.reload.aliasRemoved': 'Model alias "{alias}" used by this session was removed in the new config; keeping the previous provider. Switch with /model or restart to apply.',
+  'app.reload.aliasInvalid': 'Model alias "{alias}" cannot be resolved in the new config (invalid provider target); keeping the previous provider.',
+  'app.reload.restartSuffix': ' (requires restart)',
+
   // --- App /plugin management & plugin-namespaced commands ---
   'app.plugin.usage': 'Usage: /plugin [list] · /plugin install <local dir> · /plugin enable <id> · /plugin disable <id> · /plugin remove <id> · /plugin info <id>',
   'app.plugin.list.empty': 'No plugins installed. Install one with /plugin install <local dir>.',
@@ -683,6 +704,7 @@ const en: Record<keyof typeof zh, string> = {
   'cmd.lang': 'Show or switch UI language: /lang [zh|en]',
   'cmd.mcp': 'Show MCP server connection status and tool counts',
   'cmd.skill': 'Activate a skill or list available skills: /skill [name] [args]; /skill reload forces a rescan',
+  'cmd.reload': 'Hot-reload config.toml (no process restart; session and history preserved)',
   'cmd.plugin': 'Manage plugins: /plugin [list|install|enable|disable|remove|info]',
   'cmd.exit': 'Quit Step Code',
   'cmd.helpText.aliasSuffix': ' (/{aliases})',
