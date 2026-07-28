@@ -6,14 +6,13 @@ import type { DisplayItem } from './types.js';
 /**
  * 会话回放：把恢复的历史消息（StoredMessage[]）投影成可渲染的 DisplayItem[]。
  *
- * 设计参考 某竞品CLI 的 session-replay，但适配 Step Code 的数据驱动 UI：
- * Step Code 的 DisplayItem 是静态数据结构（不像 某竞品 有流式 UI 控制器），
- * 所以直接构造与实时 applyEvent 结构一致的 DisplayItem，无需模拟流式管线。
+ * 适配 Step Code 的数据驱动 UI：DisplayItem 是静态数据结构，
+ * 故直接构造与实时 applyEvent 结构一致的 DisplayItem，无需模拟流式管线。
  * 产物走同一个 MessageItem 组件渲染，保证回放与实时逐像素一致。
  *
  * 关键处理：
  * - assistant 的 text 块拼成一条 assistant，thinking 块落成 thinking，tool_use 落成 tool；
- * - tool_result 按 tool_use_id 配对回填到对应 tool 的 result/status（借鉴 某竞品 的 Map 配对）；
+ * - tool_result 按 tool_use_id 配对回填到对应 tool 的 result/status（Map 配对）；
  * - origin='injection' 跳过（内部注入的 system-reminder 不该显示给用户）；
  * - 图片块转成 [图片] 占位（resume 时图片是 stepref 指针，历史区不实际渲染）；
  * - 按轮次截断（sliceRecentTurns），避免长会话一次性刷屏。

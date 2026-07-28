@@ -4,7 +4,7 @@ import { t } from '../i18n.js';
 /**
  * 识别 Anthropic SDK 的空流错误：MessageStream 在没收到任何 message_start 的情况下被
  * drain 完，finalMessage() 抛出不带 HTTP status 的 AnthropicError，是网关/服务端瞬时故障
- * 的典型表现。对齐 某竞品CLI（无 status 的 provider 错误默认可重试）与 Codex
+ * 的典型表现。通行做法是无 status 的 provider 错误默认可重试，与 Codex
  * （closed before terminal event → 可重试 Stream）的判定。
  */
 export function isEmptyStreamError(err: unknown): boolean {
