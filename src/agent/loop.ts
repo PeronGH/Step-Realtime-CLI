@@ -268,7 +268,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
   }
 
   // maxIterations 撞线：单轮步数上限降级为「本 run 用完」——hook 给出续接描述时
-  // 产出 continuation + turn_done 正常收尾（换下一个 run 继续，对齐 某竞品 #2210）；
+  // 产出 continuation + turn_done 正常收尾（换下一个 run 继续）；
   // hook 缺省（headless、无 goal）返回 null，照旧 error，非 goal 场景行为不变。
   const cont = await resolveContinuation(hooks);
   if (cont !== null) {

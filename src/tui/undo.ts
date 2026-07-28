@@ -6,7 +6,7 @@ import type { DisplayItem } from './types.js';
 /**
  * /undo 的纯函数层。
  *
- * 语义（对齐 某竞品CLI）：撤销最近 N 轮用户 prompt——从第 N 个 origin==='user' 的消息起
+ * 语义：撤销最近 N 轮用户 prompt——从第 N 个 origin==='user' 的消息起
  * 到数组末尾全部回滚（含该轮产出的 assistant 回复与 tool 结果），不回滚代码改动。
  * 压缩点之前不可撤销：full 压缩把旧轮的 origin 改写为 user_verbatim/compaction_summary，
  * 按 === 'user' 全等扫描天然不把它们算作轮起点（与 turns.ts/backtrack.ts 同一口径）。

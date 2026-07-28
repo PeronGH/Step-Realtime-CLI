@@ -30,7 +30,7 @@ provider = "stepfun"                 # 默认 stepfun（anthropic 协议）
 
 文件位置：`~/.step-code/config.toml`。
 
-只有用户级这一份，没有项目级 config.toml——配置文件位置即信任边界：项目目录里的配置文件不能静默注入 api_key、base_url 这类敏感项。项目粒度的定制走目录约定（项目级 skills、`.step-code/mcp.json`、AGENTS.md），这与 某竞品CLI、Codex 的设计一致（两家同样只有用户级主配置）。
+只有用户级这一份，没有项目级 config.toml——配置文件位置即信任边界：项目目录里的配置文件不能静默注入 api_key、base_url 这类敏感项。项目粒度的定制走目录约定（项目级 skills、`.step-code/mcp.json`、AGENTS.md），这与 Codex 等工具的设计一致（同样只有用户级主配置）。
 
 ### 顶层字段
 

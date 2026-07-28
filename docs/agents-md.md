@@ -40,7 +40,7 @@ agents_paths = ["~/my-rules/AGENTS.md", "./team-docs"]
 
 ## 与其他工具的关系
 
-step-code 的收集结构（用户级 + 项目级逐层、From 注释头、预算默认 32KB）与 某竞品CLI 一致，`AGENTS.override.md` 约定与 Codex 一致；预算可调与截断提示则参考 Codex 的 `project_doc_max_bytes`（含 `0` = 禁用）并补上了两家都没有的启动提示。同一份 `~/.agents/AGENTS.md` 可以被多个 agent 工具共享。
+step-code 的收集结构（用户级 + 项目级逐层、From 注释头、预算默认 32KB）与主流 agent CLI 一致，`AGENTS.override.md` 约定与 Codex 一致；预算可调与截断提示则参考 Codex 的 `project_doc_max_bytes`（含 `0` = 禁用）并补上了其它工具没有的启动提示。同一份 `~/.agents/AGENTS.md` 可以被多个 agent 工具共享。
 
 ## 维护建议
 

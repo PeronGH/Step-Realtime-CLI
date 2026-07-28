@@ -9,7 +9,6 @@ Step Code 的源码由本项目自行编写，在设计阶段参考并受到下�
 | 项目 | 作者 / 版权方 | 许可证 | 本目录文件 |
 |------|---------------|--------|-----------|
 | OpenAI Codex CLI（openai/codex） | OpenAI | Apache-2.0 | `codex-Apache-2.0-LICENSE.txt` |
-
 | OpenCode（sst/opencode） | opencode | MIT | `opencode-MIT-LICENSE.txt` |
 
 ## 关于 Claude Code

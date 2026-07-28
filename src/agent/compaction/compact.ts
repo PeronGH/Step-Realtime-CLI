@@ -26,8 +26,8 @@ const COMPACTION_SUMMARY_MIN_RATIO = 0.02;
 
 /**
  * 全量压缩摘要最大尝试次数。每次失败后收缩输入（丢弃最老消息 + 其后的孤儿 tool_result），
- * 对齐 某竞品CLI compactionRound 的 empty/truncated 重试循环（某竞品 取 5 次；
- * step-code 已有 user_verbatim 保真兜底，取 3 次够用且少烧摘要调用）。
+ * 按 empty/truncated 重试循环处理（同类实现常取 5 次；step-code 已有 user_verbatim
+ * 保真兜底，取 3 次够用且少烧摘要调用）。
  */
 const COMPACTION_MAX_RETRIES = 3;
 
@@ -321,7 +321,7 @@ function takeRecentMessagesWithinTokenBudget(messages: StoredMessage[], tokenBud
 
 /**
  * overflow 比例收缩：按 ratio 保留最近消息，降低摘要请求的输入长度。
- * 对齐 某竞品CLI 的 `shrinkCompactionHistoryAfterOverflow`（ratios [0.7, 0.5, 0.35]）。
+ * ratios [0.7, 0.5, 0.35] 来自对同类实现压缩兜底策略的对齐。
  */
 function shrinkCompactionHistoryAfterOverflow(messages: StoredMessage[], ratio: number): StoredMessage[] {
   if (messages.length <= 1) return messages.slice();
@@ -330,9 +330,8 @@ function shrinkCompactionHistoryAfterOverflow(messages: StoredMessage[], ratio: 
 }
 
 /**
- * 摘要重试前收缩输入：丢弃最老一条消息，以及紧随其后因此变成孤儿的 tool_result。
- * 对齐 某竞品CLI 的 `dropOldestMessageAndLeadingToolResults`：给摘要模型更少的输入，
- * 降低再次截断/空返的概率。
+ * 摘要重试前收缩输入：丢弃最老一条消息，以及紧随其后因此变成孤儿的 tool_result，
+ * 给摘要模型更少的输入，降低再次截断/空返的概率。
  */
 function dropOldestMessageAndLeadingToolResults(messages: readonly StoredMessage[]): StoredMessage[] {
   if (messages.length <= 1) return messages.slice();
@@ -650,7 +649,7 @@ export async function fullCompact(
     userBudget?.headTokens ?? COMPACT_USER_MESSAGE_HEAD_TOKENS,
   );
 
-  // 摘要生成 + 质量校验 + 重试（对标 某竞品CLI compactionRound 的 empty/truncated 重试循环）。
+  // 摘要生成 + 质量校验 + 重试（按 empty/truncated 重试循环处理）。
   // 区分三类失败：
   //   1. context overflow / 413：先尝试剥离媒体块，再按比例收缩历史（[0.7, 0.5, 0.35]），
   //      而不是直接丢弃消息——因为这类错误往往是大输入导致，收缩比例更可控；
