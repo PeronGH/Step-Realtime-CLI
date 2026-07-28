@@ -4,11 +4,20 @@ import type Anthropic from '@anthropic-ai/sdk';
 /**
  * storage 层 message 的来源标记：决定 undo 边界、压缩处理、以及投影到 wire 时的取舍。
  * - user/assistant/tool：正常对话轮
+ * - user_verbatim：压缩时保真保留的用户原话（wire 里就是普通 user 消息，storage 层可识别）
  * - compaction_summary：full 压缩产出的摘要（wire 里是普通文本，storage 层可识别）
  * - injection：注入的 system-reminder（append-only，压缩后可重注入）
+ *
+ * `user_verbatim` 与 `user` 的分工：前者是压缩产物、不是真人这一轮的输入。
+ * 因此它**不**参与轮次计数（turns.ts）与回退编辑（backtrack.ts）——那两处按 `=== 'user'`
+ * 全等判断，新类型天然被排除，这是有意的：否则 Ctrl+回退会把压缩保真块当成
+ * 「上一条用户输入」取回输入框，轮数也会随压缩虚增。
+ * 但它**要**参与下一轮压缩的保真选择（compact.ts 的 isCompactableUserOrigin），
+ * 这正是原话能跨多轮压缩存活的机制。
  */
 export type MessageOrigin =
   | 'user'
+  | 'user_verbatim'
   | 'assistant'
   | 'tool'
   | 'compaction_summary'

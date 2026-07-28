@@ -1,17 +1,36 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import {
+  createElisionMessage,
+  estimateTextTokens,
   estimateTokens,
   fullCompact,
+  isAckOnlyText,
   microCompact,
+  selectCompactionUserMessages,
   shouldCompact,
   usageTotalTokens,
 } from '../../src/agent/compaction/compact.js';
 import { stored, type StoredMessage } from '../../src/agent/message.js';
 import { makeFakeProvider, textBlock } from '../helpers/fakeProvider.js';
 
+/** 取压缩产物里的摘要消息（保真消息排在它之前，故不能再假定它是 out[0]）。 */
+function summaryOf(out: StoredMessage[]): StoredMessage {
+  const m = out.find((sm) => sm.origin === 'compaction_summary');
+  if (m === undefined) throw new Error('压缩产物里没有 compaction_summary 消息');
+  return m;
+}
+
 function toolResultMsg(id: string, content: string): StoredMessage {
   return stored({ role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content }] }, 'tool');
+}
+
+/**
+ * 构造正文足够长（≥ MICRO_MIN_CONTENT_TOKENS）的 tool_result，用于验证 micro 清理行为。
+ * micro 压缩有净收益门槛：短结果不清，故验证「会清」的用例必须用大结果。
+ */
+function bigToolResultMsg(id: string, marker = 'DATA'): StoredMessage {
+  return toolResultMsg(id, `${marker} `.repeat(200));
 }
 
 /** 构造一条「文本 + 图片」的用户消息，图片 source.data 取传入值（base64 或 stepref）。 */
@@ -27,6 +46,40 @@ function imageMsg(data: string): StoredMessage {
     'user',
   );
 }
+
+describe('estimateTextTokens', () => {
+  it('空串为 0', () => {
+    expect(estimateTextTokens('')).toBe(0);
+  });
+
+  it('纯 ASCII 按 ÷4 向上取整', () => {
+    expect(estimateTextTokens('abcd')).toBe(1); // 4/4
+    expect(estimateTextTokens('abcdefgh')).toBe(2); // 8/4
+    expect(estimateTextTokens('abcde')).toBe(2); // ceil(5/4)
+  });
+
+  it('纯中文（非 ASCII）每字符 1 token', () => {
+    expect(estimateTextTokens('你好')).toBe(2);
+    expect(estimateTextTokens('中文测试字符')).toBe(6);
+  });
+
+  it('中英混合 = ceil(ascii/4) + 非 ASCII 数', () => {
+    // 'ab你好cd'：ascii=4 → 1，非 ascii=2 → 2，合计 3
+    expect(estimateTextTokens('ab你好cd')).toBe(3);
+  });
+
+  it('emoji 等代理对按单个非 ASCII 字符计（for..of 按 code point 迭代）', () => {
+    expect(estimateTextTokens('😀')).toBe(1);
+    expect(estimateTextTokens('hi😀')).toBe(estimateTextTokens('hi') + 1);
+  });
+
+  it('中文估算比旧 chars/3 口径更高（不再对中文偏低）', () => {
+    const cn = '这是一段中文文本用于对比估算口径';
+    // 旧口径 ceil(len/3)，新分桶对纯中文 = len，必然更大
+    expect(estimateTextTokens(cn)).toBeGreaterThan(Math.ceil(cn.length / 3));
+    expect(estimateTextTokens(cn)).toBe(cn.length);
+  });
+});
 
 describe('estimateTokens', () => {
   it('随内容增大而增大，空历史为 0', () => {
@@ -88,8 +141,8 @@ describe('shouldCompact', () => {
 describe('microCompact', () => {
   it('清空较旧 tool_result 正文，保留最近 keepRecent 条', () => {
     const msgs: StoredMessage[] = [
-      toolResultMsg('a', 'OLD-A'.repeat(50)),
-      toolResultMsg('b', 'OLD-B'.repeat(50)),
+      bigToolResultMsg('a', 'OLD-A'),
+      bigToolResultMsg('b', 'OLD-B'),
       stored({ role: 'assistant', content: [textBlock('中间')] }, 'assistant'),
       toolResultMsg('c', 'RECENT-C'),
     ];
@@ -103,9 +156,9 @@ describe('microCompact', () => {
 
   it('不改动入参，且重复压缩不重复计数', () => {
     const msgs: StoredMessage[] = [
-      toolResultMsg('a', 'DATA'),
-      toolResultMsg('b', 'DATA'),
-      toolResultMsg('c', 'DATA'),
+      bigToolResultMsg('a'),
+      bigToolResultMsg('b'),
+      bigToolResultMsg('c'),
     ];
     const before = JSON.stringify(msgs);
     const first = microCompact(msgs, 1);
@@ -114,10 +167,31 @@ describe('microCompact', () => {
     expect(second.clearedCount).toBe(0);
   });
 
+  it('净收益门槛：小于 minContentTokens 的 tool_result 不清（省不下 token 还丢信息）', () => {
+    const msgs: StoredMessage[] = [
+      toolResultMsg('a', 'exit 0'),
+      toolResultMsg('b', '/tmp/x.log'),
+      toolResultMsg('c', 'RECENT'),
+    ];
+    const r = microCompact(msgs, 1);
+    expect(r.clearedCount).toBe(0);
+    expect(r.messages).toEqual(msgs); // 内容一字未改（数组本身是 map 产物，非同引用）
+  });
+
+  it('净收益门槛可下调：显式 minContentTokens=1 时小结果也清（溢出保命路径口径）', () => {
+    const msgs: StoredMessage[] = [
+      toolResultMsg('a', 'exit 0'),
+      toolResultMsg('b', '/tmp/x.log'),
+      toolResultMsg('c', 'RECENT'),
+    ];
+    const r = microCompact(msgs, 1, undefined, 1);
+    expect(r.clearedCount).toBe(2);
+  });
+
   it('缓存冷 gate：缓存仍热时跳过改写（clearedCount 0，原样返回）', () => {
     const msgs: StoredMessage[] = [
-      toolResultMsg('a', 'OLD-A'.repeat(50)),
-      toolResultMsg('b', 'OLD-B'.repeat(50)),
+      bigToolResultMsg('a', 'OLD-A'),
+      bigToolResultMsg('b', 'OLD-B'),
       toolResultMsg('c', 'RECENT'),
     ];
     const now = 1_000_000_000_000;
@@ -129,8 +203,8 @@ describe('microCompact', () => {
 
   it('缓存冷 gate：距上次活动超阈值时照常改写', () => {
     const msgs: StoredMessage[] = [
-      toolResultMsg('a', 'OLD-A'.repeat(50)),
-      toolResultMsg('b', 'OLD-B'.repeat(50)),
+      bigToolResultMsg('a', 'OLD-A'),
+      bigToolResultMsg('b', 'OLD-B'),
       toolResultMsg('c', 'RECENT'),
     ];
     const now = 1_000_000_000_000;
@@ -140,7 +214,7 @@ describe('microCompact', () => {
   });
 
   it('不传 cacheGate 时无条件改写（溢出保命路径）', () => {
-    const msgs: StoredMessage[] = [toolResultMsg('a', 'DATA'), toolResultMsg('b', 'DATA'), toolResultMsg('c', 'X')];
+    const msgs: StoredMessage[] = [bigToolResultMsg('a'), bigToolResultMsg('b'), toolResultMsg('c', 'X')];
     const r = microCompact(msgs, 1);
     expect(r.clearedCount).toBe(2);
   });
@@ -161,9 +235,9 @@ describe('fullCompact', () => {
       stored({ role: 'user', content: '最近3' }, 'user'),
     ];
     const out = await fullCompact(provider, msgs, 2);
-    expect(out[0]!.origin).toBe('compaction_summary');
-    expect(out[0]!.message.content).toContain('早期对话摘要');
-    expect(out[0]!.message.content).toContain('ORION');
+    const summary = summaryOf(out);
+    expect(summary.message.content).toContain('早期对话摘要');
+    expect(summary.message.content).toContain('ORION');
     expect(out.at(-1)!.message.content).toBe('最近3');
   });
 
@@ -188,7 +262,7 @@ describe('fullCompact', () => {
         sm.message.content.some((b) => b.type === 'tool_result'),
     );
     expect(orphan).toBe(false); // tool_result 已随其 tool_use 一起被摘要吞掉
-    expect(out[0]!.message.content).toContain('早期对话摘要');
+    expect(summaryOf(out).message.content).toContain('早期对话摘要');
   });
 
   it('历史过短时原样返回', async () => {
@@ -204,15 +278,15 @@ describe('fullCompact', () => {
       stored({ role: 'user', content: 'a' }, 'user'),
       stored({ role: 'assistant', content: [textBlock('b')] }, 'assistant'),
       stored({ role: 'user', content: 'c' }, 'user'),
-      stored({ role: 'user', content: 'd' }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('d')] }, 'assistant'),
     ];
-    const out = await fullCompact(provider, msgs, 1);
-    expect(out).toEqual(msgs);
+    const out = await fullCompact(provider, msgs, 2);
+    expect(out).toBe(msgs); // 同引用 = 未压缩
   });
 
   it('提供 todos 时把清单拼进摘要尾部', async () => {
     const { provider } = makeFakeProvider([
-      { textChunks: [], finalContent: [textBlock('早期摘要')] },
+      { textChunks: [], finalContent: [textBlock('摘要正文')] },
     ]);
     const msgs: StoredMessage[] = [
       stored({ role: 'user', content: '开始' }, 'user'),
@@ -220,35 +294,31 @@ describe('fullCompact', () => {
       stored({ role: 'user', content: '最近1' }, 'user'),
       stored({ role: 'assistant', content: [textBlock('最近2')] }, 'assistant'),
       stored({ role: 'user', content: '最近3' }, 'user'),
-      stored({ role: 'assistant', content: [textBlock('最近4')] }, 'assistant'),
-      stored({ role: 'user', content: '最近5' }, 'user'),
     ];
-    const todos = [{ title: '实现登录', status: 'in_progress' }];
-    const out = await fullCompact(provider, msgs, 2, todos);
-    expect(out[0]!.message.content).toContain('## TODO List');
-    expect(out[0]!.message.content).toContain('实现登录');
+    const out = await fullCompact(provider, msgs, 2, [
+      { title: '实现登录', status: 'in_progress' },
+      { title: '写测试', status: 'pending' },
+    ]);
+    const content = summaryOf(out).message.content as string;
+    expect(content).toContain('## TODO List');
+    expect(content).toContain('实现登录');
   });
 
   it('摘要 prompt 里图片渲染为带 hash 的 marker（不降级成字面 [image]、不内联 base64）', async () => {
     const { provider, streamParams } = makeFakeProvider([
-      { textChunks: [], finalContent: [textBlock('早期摘要')] },
+      { textChunks: [], finalContent: [textBlock('摘要')] },
     ]);
-    const hash = 'a'.repeat(64);
-    const inlineB64 = Buffer.alloc(100, 1).toString('base64'); // 内联小图（无 hash）
     const msgs: StoredMessage[] = [
-      imageMsg(`stepref:${hash}`),
-      stored({ role: 'assistant', content: [textBlock('收到')] }, 'assistant'),
-      imageMsg(inlineB64),
-      stored({ role: 'assistant', content: [textBlock('好')] }, 'assistant'),
+      imageMsg('stepref:abcd1234ef567890'),
+      stored({ role: 'assistant', content: [textBlock('看到了')] }, 'assistant'),
       stored({ role: 'user', content: '最近1' }, 'user'),
       stored({ role: 'assistant', content: [textBlock('最近2')] }, 'assistant'),
+      stored({ role: 'user', content: '最近3' }, 'user'),
     ];
     await fullCompact(provider, msgs, 2);
-    const prompt = (streamParams()[0]!['messages'] as { content: string }[])[0]!.content;
-    // stepref 图带 hash 前 8 位定位信息；内联小图只标 mediaType
-    expect(prompt).toContain(`[image image/png ${hash.slice(0, 8)}]`);
-    expect(prompt).toContain('[image image/png]');
-    expect(prompt).not.toContain(inlineB64);
+    const prompt = (streamParams()[0]!['messages'] as Array<{ content: string }>)[0]!.content;
+    expect(prompt).toContain('[image image/png abcd1234]');
+    expect(prompt).not.toContain('stepref:abcd1234ef567890');
   });
 
   it('传入 model 时摘要调用带 model 覆盖（大小模型协同）', async () => {
@@ -263,7 +333,7 @@ describe('fullCompact', () => {
       stored({ role: 'user', content: '最近3' }, 'user'),
     ];
     const out = await fullCompact(provider, msgs, 2, undefined, 'step-flash');
-    expect(out[0]!.origin).toBe('compaction_summary');
+    expect(summaryOf(out).origin).toBe('compaction_summary');
     expect(streamParams()[0]!['model']).toBe('step-flash');
   });
 
@@ -280,5 +350,273 @@ describe('fullCompact', () => {
     ];
     await fullCompact(provider, msgs, 2);
     expect(streamParams()[0]!['model']).toBeUndefined();
+  });
+});
+
+describe('isAckOnlyText', () => {
+  it('纯确认语命中（含尾部标点与大小写归一）', () => {
+    for (const s of ['继续', '继续。', '好的', '好的！', ' 嗯 ', 'OK', 'ok.', 'Yes', '收到', 'thanks']) {
+      expect(isAckOnlyText(s)).toBe(true);
+    }
+  });
+
+  it('只有标点或空白也算无信息', () => {
+    for (const s of ['', '   ', '。。。', '!!!']) expect(isAckOnlyText(s)).toBe(true);
+  });
+
+  it('载有信息的短消息不被误判（宁可留噪音，不可丢信号）', () => {
+    for (const s of ['用方案 B', '改用 GPT', '继续用旧的', '好的方案是 A', 'ok 但要加超时', '路径是 /tmp/x']) {
+      expect(isAckOnlyText(s)).toBe(false);
+    }
+  });
+});
+
+describe('selectCompactionUserMessages', () => {
+  it('预算充足时全留在 tail，且 origin 落成 user_verbatim（可跨轮继承）', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '第一条' }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('回应')] }, 'assistant'),
+      stored({ role: 'user', content: '第二条' }, 'user'),
+    ];
+    const sel = selectCompactionUserMessages(msgs);
+    expect(sel.head).toEqual([]);
+    expect(sel.tail.map((m) => m.message.content)).toEqual(['第一条', '第二条']);
+    expect(sel.tail.every((m) => m.origin === 'user_verbatim')).toBe(true);
+    expect(sel.elided).toBe(false);
+    expect(sel.omittedTokens).toBe(0);
+  });
+
+  it('收 user 与 user_verbatim，排除 tool / injection / 摘要 / assistant', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '真实输入' }, 'user'),
+      stored({ role: 'user', content: '上一轮保真下来的原话' }, 'user_verbatim'),
+      toolResultMsg('t1', '工具结果'),
+      stored({ role: 'user', content: '<system-reminder>注入</system-reminder>' }, 'injection'),
+      stored({ role: 'user', content: '[早期对话摘要] 旧摘要' }, 'compaction_summary'),
+      stored({ role: 'assistant', content: [textBlock('模型的话')] }, 'assistant'),
+    ];
+    const sel = selectCompactionUserMessages(msgs);
+    expect(sel.tail.map((m) => m.message.content)).toEqual(['真实输入', '上一轮保真下来的原话']);
+  });
+
+  it('纯确认语不占预算（避免稀释注意力）', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '关键请求：路径在 /tmp/x' }, 'user'),
+      stored({ role: 'user', content: '继续' }, 'user'),
+      stored({ role: 'user', content: '好的' }, 'user'),
+      stored({ role: 'user', content: '再继续' }, 'user'),
+    ];
+    const sel = selectCompactionUserMessages(msgs);
+    // 「再继续」不在词表里（只有「继续」是），故保留；「继续」「好的」被滤掉
+    expect(sel.tail.map((m) => m.message.content)).toEqual(['关键请求：路径在 /tmp/x', '再继续']);
+  });
+
+  it('预算不足时保最早 + 最近，中段丢弃并计入 omittedTokens', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: `A${'a'.repeat(399)}` }, 'user'), // 每条 ≈100 token
+      stored({ role: 'user', content: `B${'b'.repeat(399)}` }, 'user'),
+      stored({ role: 'user', content: `C${'c'.repeat(399)}` }, 'user'),
+      stored({ role: 'user', content: `D${'d'.repeat(399)}` }, 'user'),
+    ];
+    const sel = selectCompactionUserMessages(msgs, 250, 100);
+    expect(sel.elided).toBe(true);
+    // 最早那条进 head、最近那条进 tail，中段被丢或截断
+    expect((sel.head[0]!.message.content as string).startsWith('A')).toBe(true);
+    expect((sel.tail.at(-1)!.message.content as string).endsWith('d')).toBe(true);
+    expect(sel.omittedTokens).toBeGreaterThan(0);
+  });
+
+  it('单条超预算时按方向截断：最近消息留结尾并带截断标记', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: `${'X'.repeat(400)}关键收尾诉求` }, 'user'),
+    ];
+    const sel = selectCompactionUserMessages(msgs, 40, 0);
+    expect(sel.tail).toHaveLength(1);
+    const text = sel.tail[0]!.message.content as string;
+    expect(text.endsWith('关键收尾诉求')).toBe(true);
+    expect(text).toContain('本条前半已截断');
+  });
+
+  it('大 paste 的丢弃前缀回收进 head：头尾都保住，只丢中间', () => {
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: `任务定义在开头${'M'.repeat(2000)}关键收尾在结尾` }, 'user'),
+    ];
+    // 单条远超预算：tail 留结尾、被截掉的前缀回收进 head 留开头
+    const sel = selectCompactionUserMessages(msgs, 100, 40);
+    const headText = sel.head.map((m) => m.message.content as string).join('');
+    const tailText = sel.tail.map((m) => m.message.content as string).join('');
+    expect(headText).toContain('任务定义在开头');
+    expect(tailText).toContain('关键收尾在结尾');
+    expect(sel.omittedTokens).toBeGreaterThan(0);
+  });
+
+  it('预算为 0 时返回空选择（等于关闭保真）', () => {
+    const msgs: StoredMessage[] = [stored({ role: 'user', content: '任何内容' }, 'user')];
+    const sel = selectCompactionUserMessages(msgs, 0);
+    expect(sel).toEqual({ head: [], tail: [], elided: false, omittedTokens: 0 });
+  });
+});
+
+describe('createElisionMessage', () => {
+  it('用 injection origin（下一轮不当用户输入收集，故不层层累积）并写明省略规模', () => {
+    const m = createElisionMessage(1234);
+    expect(m.origin).toBe('injection');
+    const text = m.message.content as string;
+    expect(text).toContain('<system-reminder>');
+    expect(text).toContain('1234');
+    expect(text).toContain('不要臆测');
+  });
+});
+
+describe('fullCompact 用户原话保真', () => {
+  /** 模拟真实历史里的长 assistant 输出（让 older 段以模型产出为主，用户原话占比低于守卫阈值）。 */
+  function bulkAssistant(tag: string): StoredMessage {
+    return stored({ role: 'assistant', content: [textBlock(`${tag} ${'详细分析内容'.repeat(40)}`)] }, 'assistant');
+  }
+
+  it('用户原话以独立 user_verbatim 消息保留，排在摘要之前', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('我已经确认了路径并改完了配置。')] },
+    ]);
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '项目在 C:/proj/step-code-suite 这个哈' }, 'user'),
+      bulkAssistant('A1'),
+      stored({ role: 'user', content: '代号 ORION，别写成 ORLON' }, 'user'),
+      bulkAssistant('A2'),
+      stored({ role: 'user', content: '最近1' }, 'user'),
+      bulkAssistant('A3'),
+      stored({ role: 'user', content: '最近3' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 2);
+    const verbatim = out.filter((m) => m.origin === 'user_verbatim');
+    const texts = verbatim.map((m) => m.message.content as string);
+    // 原话保真：路径与代号原样在场，不是摘要转述
+    expect(texts.some((t) => t.includes('C:/proj/step-code-suite'))).toBe(true);
+    expect(texts.some((t) => t.includes('代号 ORION，别写成 ORLON'))).toBe(true);
+    // 顺序：保真消息全部排在摘要之前
+    const summaryIdx = out.findIndex((m) => m.origin === 'compaction_summary');
+    const lastVerbatimIdx = out.reduce((acc, m, i) => (m.origin === 'user_verbatim' ? i : acc), -1);
+    expect(lastVerbatimIdx).toBeLessThan(summaryIdx);
+    expect(out.at(-1)!.message.content).toBe('最近3');
+  });
+
+  it('跨轮继承：连续两次压缩后，第一轮的原话仍以原文在场', async () => {
+    const mkProvider = () =>
+      makeFakeProvider([{ textChunks: [], finalContent: [textBlock('细节我已了解，继续推进。')] }]).provider;
+    const SECRET = 'C:/proj/very-specific-path';
+    let history: StoredMessage[] = [
+      stored({ role: 'user', content: `项目在 ${SECRET} 这个哈` }, 'user'),
+      bulkAssistant('A1'),
+      stored({ role: 'user', content: '注意 key 在 keys.json' }, 'user'),
+      bulkAssistant('A2'),
+      bulkAssistant('A3'),
+      stored({ role: 'user', content: '第一轮末尾' }, 'user'),
+    ];
+    history = await fullCompact(mkProvider(), history, 2);
+    expect(history.some((m) => (m.message.content as string).includes?.(SECRET))).toBe(true);
+
+    // 会话继续堆内容，触发第二次压缩
+    history = [
+      ...history,
+      bulkAssistant('B1'),
+      stored({ role: 'user', content: '现在改压缩逻辑' }, 'user'),
+      bulkAssistant('B2'),
+      stored({ role: 'user', content: '第二轮末尾' }, 'user'),
+    ];
+    history = await fullCompact(mkProvider(), history, 2);
+
+    const allText = history.map((m) => JSON.stringify(m.message.content)).join('\n');
+    expect(allText).toContain(SECRET); // 关键：跨轮不丢
+    expect(allText).toContain('keys.json');
+    expect(allText).toContain('现在改压缩逻辑');
+  });
+
+  it('保真占被压缩段比例过高时退回纯摘要（压缩不该退化成原地搬运）', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('摘要正文')] },
+    ]);
+    // older 段几乎全是用户原话（assistant 极短）→ 占比超阈值 → 不保真
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: `长请求 ${'内容'.repeat(80)}` }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('好')] }, 'assistant'),
+      stored({ role: 'user', content: `再一条 ${'内容'.repeat(80)}` }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('嗯')] }, 'assistant'),
+      stored({ role: 'user', content: '最近' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 2);
+    expect(out.some((m) => m.origin === 'user_verbatim')).toBe(false);
+    expect(summaryOf(out).message.content).toContain('摘要正文');
+  });
+
+  it('保真预算为 0 时退回纯摘要形态', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('纯摘要正文')] },
+    ]);
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '早期请求' }, 'user'),
+      bulkAssistant('A1'),
+      stored({ role: 'user', content: '最近1' }, 'user'),
+      bulkAssistant('A2'),
+      stored({ role: 'user', content: '最近3' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 2, undefined, undefined, { maxTokens: 0 });
+    expect(out.some((m) => m.origin === 'user_verbatim')).toBe(false);
+    expect(summaryOf(out).message.content).toContain('纯摘要正文');
+  });
+
+  it('recent 段的用户消息不进保真（避免与保留的原消息重复）', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('摘要')] },
+    ]);
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: 'OLD-ONLY-IN-VERBATIM' }, 'user'),
+      bulkAssistant('A1'),
+      bulkAssistant('A2'),
+      stored({ role: 'user', content: 'RECENT-KEPT-AS-IS' }, 'user'),
+      bulkAssistant('A3'),
+      stored({ role: 'user', content: 'RECENT-LAST' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 3);
+    const verbatimTexts = out.filter((m) => m.origin === 'user_verbatim').map((m) => m.message.content);
+    expect(verbatimTexts).toContain('OLD-ONLY-IN-VERBATIM');
+    expect(verbatimTexts).not.toContain('RECENT-KEPT-AS-IS');
+    // recent 段那条仍以原 origin 在场
+    expect(out.some((m) => m.origin === 'user' && m.message.content === 'RECENT-KEPT-AS-IS')).toBe(true);
+  });
+
+  it('保真消息不参与轮次计数与回退编辑（origin 与真人输入区分开）', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('摘要')] },
+    ]);
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '早期关键请求：路径 /tmp/x' }, 'user'),
+      bulkAssistant('A1'),
+      bulkAssistant('A2'),
+      stored({ role: 'user', content: '最近的真人输入' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 1);
+    // 保真消息用 user_verbatim，故 turns.ts / backtrack.ts 的 `=== 'user'` 判断不会命中它
+    expect(out.filter((m) => m.origin === 'user_verbatim').length).toBeGreaterThan(0);
+    expect(out.filter((m) => m.origin === 'user').length).toBe(1);
+  });
+
+  it('摘要 prompt 带上 handoff 认知要求（已决/未决分离、未验证标注）', async () => {
+    const { provider, streamParams } = makeFakeProvider([
+      { textChunks: [], finalContent: [textBlock('摘要')] },
+    ]);
+    const msgs: StoredMessage[] = [
+      stored({ role: 'user', content: '开始' }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('好')] }, 'assistant'),
+      stored({ role: 'user', content: '最近1' }, 'user'),
+      stored({ role: 'assistant', content: [textBlock('最近2')] }, 'assistant'),
+      stored({ role: 'user', content: '最近3' }, 'user'),
+    ];
+    await fullCompact(provider, msgs, 2);
+    const params = streamParams()[0]!;
+    const prompt = (params['messages'] as Array<{ content: string }>)[0]!.content;
+    expect(prompt).toContain('仍然待定');
+    expect(prompt).toContain('未验证');
+    expect(prompt).toContain('你仍然不知道什么');
+    expect(params['system']).toContain('第一人称');
   });
 });

@@ -3,6 +3,7 @@ import { t } from '../i18n.js';
 import { toAnthropicTools } from '../tools/index.js';
 import type { ToolContext } from '../tools/types.js';
 import {
+  COMPACT_USER_MESSAGE_MAX_TOKENS,
   estimateTokens,
   fullCompact,
   microCompact,
@@ -22,6 +23,13 @@ export type { AgentEvent } from './events.js';
 const KEEP_RECENT = 6;
 /** 单次 runAgent 内因溢出触发强制压缩重试的上限，防死循环。 */
 const MAX_OVERFLOW_RETRIES = 3;
+/**
+ * 溢出重试的递进收缩比。
+ * 第 N 次重试按第 N 个比例同时收缩「保留的最近消息条数」和「用户原话保真预算」。
+ * 不这么做的话每次重试都跑同一套参数——第一次压不下去，后两次必然也压不下去，
+ * 三次重试等于白烧三次摘要调用。
+ */
+const OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
 
 export interface RunAgentOptions {
   provider: ChatProvider;
@@ -48,6 +56,11 @@ export interface RunAgentOptions {
   compaction?: CompactionThresholds;
   /** 压缩摘要专用模型覆盖（大小模型协同）。省略 = 用 provider 默认模型压缩。 */
   compactionModel?: string;
+  /**
+   * 用户原话保真预算覆盖（压缩时在摘要之外单独保留的用户原始消息）。
+   * 省略 = 用 compact.ts 的默认值（20K / 头 2K）。溢出重试时会在此基础上再按收缩比缩小。
+   */
+  userMessageBudget?: { maxTokens?: number; headTokens?: number };
   /** 当前 TODO 清单（独立 store），压缩时拼进摘要尾部，防止压缩后丢任务进度。 */
   todos?: readonly { title: string; status: string }[];
   /**
@@ -84,6 +97,7 @@ async function maybeCompact(
   thresholds: CompactionThresholds,
   todos?: readonly { title: string; status: string }[],
   compactionModel?: string,
+  userMessageBudget?: { maxTokens?: number; headTokens?: number },
 ): Promise<boolean> {
   if (!shouldCompact(usedTokens, thresholds)) return false;
   let acted = false;
@@ -100,7 +114,14 @@ async function maybeCompact(
   }
   // micro 后无新 usage，用字符估算重判是否仍需 full
   if (shouldCompact(estimateTokens(messages), thresholds)) {
-    const compacted = await fullCompact(provider, messages, KEEP_RECENT, todos, compactionModel);
+    const compacted = await fullCompact(
+      provider,
+      messages,
+      KEEP_RECENT,
+      todos,
+      compactionModel,
+      userMessageBudget,
+    );
     if (compacted !== messages) {
       replaceMessages(messages, compacted);
       acted = true;
@@ -159,13 +180,28 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
           return;
         }
         overflowRetries++;
+        // 递进收缩：第 N 次重试用更狠的参数，避免三次重试跑同一套（压不下去还烧三次摘要调用）
+        const ratio = OVERFLOW_SHRINK_RATIOS[Math.min(overflowRetries - 1, OVERFLOW_SHRINK_RATIOS.length - 1)]!;
+        const keepRecent = Math.max(2, Math.floor(KEEP_RECENT * ratio));
+        const userMaxTokens = Math.max(
+          1_000,
+          Math.floor((opts.userMessageBudget?.maxTokens ?? COMPACT_USER_MESSAGE_MAX_TOKENS) * ratio),
+        );
         let acted = false;
-        const micro = microCompact(messages, KEEP_RECENT);
+        // 溢出保命路径：不带 cacheGate（腾空间优先于保缓存），门槛也压到 1 token（能省就省）
+        const micro = microCompact(messages, keepRecent, undefined, 1);
         if (micro.clearedCount > 0) {
           replaceMessages(messages, micro.messages);
           acted = true;
         }
-        const compacted = await fullCompact(provider, messages, KEEP_RECENT, opts.todos, opts.compactionModel);
+        const compacted = await fullCompact(
+          provider,
+          messages,
+          keepRecent,
+          opts.todos,
+          opts.compactionModel,
+          { maxTokens: userMaxTokens },
+        );
         if (compacted !== messages) {
           replaceMessages(messages, compacted);
           acted = true;
@@ -217,8 +253,13 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
             outcome.usage !== undefined
               ? usageTotalTokens(outcome.usage) + estimateTokens(messages.slice(lenBefore))
               : estimateTokens(messages);
-          if (await maybeCompact(provider, messages, used, compaction, opts.todos, opts.compactionModel)) {
+          if (await maybeCompact(provider, messages, used, compaction, opts.todos, opts.compactionModel, opts.userMessageBudget)) {
             yield { type: 'notice', message: t('loop.autoCompacted') };
+            // 压缩后上下文占用已回落，但下一条真实 usage 要等下一回合 API 响应才到，
+            // 期间状态栏会一直停在压缩前的旧值（实测：用户以为压缩没生效）。
+            // 摘要调用的 usage 不代表会话口径，用字符估算让状态栏立刻反映压缩效果。
+            // measuredLength=压缩后全长：该估算已覆盖当前全部消息，游标设为全长，显示层尾部为空、不再叠加。
+            yield { type: 'usage', totalTokens: estimateTokens(messages), measuredLength: messages.length };
           }
         }
         continue; // 有工具结果回灌，进入下一回合

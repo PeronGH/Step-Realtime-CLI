@@ -30,12 +30,23 @@ export interface CompactionConfig {
   reservedTokens: number;
   /** 压缩摘要专用模型（大小模型协同）。缺省用主会话模型，行为与之前完全一致。 */
   model?: string;
+  /**
+   * 用户原话保真预算（token）：压缩时在摘要之外单独保留的用户原始消息总量。
+   * 缺省 20000（见 COMPACT_USER_MESSAGE_MAX_TOKENS）。0 = 关闭保真块，回到纯摘要行为。
+   * clamp [0, 200000]。
+   */
+  userMessageMaxTokens?: number;
+  /**
+   * 保真预算中划给「最早消息」的份额（token）。缺省 2000。clamp [0, userMessageMaxTokens]。
+   * 预算不足时最早消息留开头、最近消息留结尾，中段丢弃并插省略说明。
+   */
+  userMessageHeadTokens?: number;
 }
 
 /**
- * 后台执行配置（[background] 段）。三个字段全部可选，缺省不进结果对象，
+ * 后台执行配置（[background] 段）。四个字段全部可选，缺省不进结果对象，
  * 消费方用 ?? 落默认（notifyOnComplete / bashAutoBackgroundOnTimeout 默认 true，
- * bashTaskTimeoutS 默认 600、0 = 不限）。
+ * bashTaskTimeoutS 默认 600、0 = 不限；notifyTerminal 默认 true）。
  */
 export interface BackgroundConfig {
   /** bash 前台超时后自动转后台（默认 true；false 保持超时即杀）。 */
@@ -234,11 +245,11 @@ const HOOK_TIMEOUT_MAX = 600;
 // thinking 配置边界：Anthropic 协议要求 budget ≥1024；正文最小余量 2048
 // （实测教训：思考会吃满 max_tokens，余量不足时正文零输出）。
 const THINKING_BUDGET_MIN = 1024;
-const THINKING_TEXT_MARGIN = 2048;
+export const THINKING_TEXT_MARGIN = 2048;
 
 /**
  * 内置默认思考深度档位表（[thinking.levels] 未配置或全部无效时使用）。
- * 取 某竞品CLI 实战值；用户可在 config.toml 用 [thinking.levels] 整体覆盖（档位是数据不是代码）。
+ * 取实战验证过的档位值；用户可在 config.toml 用 [thinking.levels] 整体覆盖（档位是数据不是代码）。
  */
 export const DEFAULT_THINKING_LEVELS: Record<string, number> = { low: 1024, medium: 4096, high: 32000 };
 
@@ -704,6 +715,8 @@ export function loadConfig(cwd: string = process.cwd(), overrides: ConfigOverrid
   // 自定义加载路径：未配置或非法时键不进结果对象（下游 toEqual 精确断言依赖此形态）
   const agentsPaths = resolveStringArray(toml.agents_paths);
   if (agentsPaths !== undefined) cfg.agentsPaths = agentsPaths;
+  const agentsMdMaxBytes = asNumber(toml.agents_md_max_bytes);
+  if (agentsMdMaxBytes !== undefined) cfg.agentsMdMaxBytes = agentsMdMaxBytes;
   const extraSkillDirs = resolveStringArray(toml.extra_skill_dirs);
   if (extraSkillDirs !== undefined) cfg.extraSkillDirs = extraSkillDirs;
   const disabledSkills = resolveStringArray(toml.disabled_skills);

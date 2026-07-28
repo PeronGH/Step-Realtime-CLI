@@ -1117,8 +1117,24 @@ export function App({
           pushItem({ kind: 'note', text: t('app.compact.running') });
           void (async () => {
             try {
-              history.current = await fullCompact(providerRef.current, history.current, 6, todos.current, compaction.model);
+              history.current = await fullCompact(
+                providerRef.current,
+                history.current,
+                6,
+                todos.current,
+                compaction.model,
+                {
+                  maxTokens: compaction.userMessageMaxTokens,
+                  headTokens: compaction.userMessageHeadTokens,
+                },
+              );
               const after = estimateTokens(history.current);
+              // 状态栏 context 用量立即回落（否则要等下一条消息的 usage 事件才刷新，看起来像没压）。
+              // after 是压缩后全量估算，覆盖当前所有消息：基准设为 after、游标设为全长，
+              // 尾部为空、不再叠加估算（基准必须一起更新，否则后续重算会用回压缩前的旧真实 usage）。
+              baseTokensRef.current = after;
+              measuredLenRef.current = history.current.length;
+              refreshContextUsage();
               pushItem({ kind: 'note', text: t('app.compact.done', { before, after }) });
               persist();
             } catch (e) {
@@ -1448,6 +1464,10 @@ export function App({
           reservedTokens: compaction.reservedTokens,
         },
         compactionModel: compaction.model,
+        userMessageBudget: {
+          maxTokens: compaction.userMessageMaxTokens,
+          headTokens: compaction.userMessageHeadTokens,
+        },
         sessionCounter: subagentCounter.current,
         skills: skillsRef.current, // 子 agent 共享 skill（取当前注册表，支持 reload 后即时生效）
         onEvent: (id, ev) => {
@@ -1533,6 +1553,10 @@ export function App({
             reservedTokens: compaction.reservedTokens,
           },
           compactionModel: compaction.model,
+          userMessageBudget: {
+            maxTokens: compaction.userMessageMaxTokens,
+            headTokens: compaction.userMessageHeadTokens,
+          },
           todos: todos.current,
           // 后台任务终态通知：busy 中在 runAgent 每个回合边界 flush 进 messages（不等循环结束）
           injectBackgroundNotifications: true,

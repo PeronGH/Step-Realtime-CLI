@@ -1,9 +1,39 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { ChatProvider } from '../../provider/types.js';
 import { isStepref, STEPREF_PREFIX } from '../../session/attachments.js';
-import { stored, type StoredMessage } from '../message.js';
+import { stored, type MessageOrigin, type StoredMessage } from '../message.js';
 
 const CLEARED_PLACEHOLDER = '[旧工具结果已清理以节省上下文]';
+
+/**
+ * 保真保留用户原始消息的 token 预算（默认 20K，对齐 256K 窗口约 7.6%）。
+ * 压缩最大的信息损失是「用户当初到底要什么」被摘要转述掉——摘要是模型的二手转述，
+ * 一旦措辞漂移，后续回合就会按错误理解继续干活（实测：压缩后误判项目路径）。
+ * 故把用户原话当一等公民，在摘要之外单独留预算逐条保真保留。
+ */
+export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
+
+/**
+ * 用户消息预算中划给「最早消息」的份额（默认 2K，其余全给最近消息）。
+ * 最早的消息通常载有任务定义与全局约束，最近的消息载有当前意图；
+ * 中间段最容易被摘要覆盖，故预算不足时优先牺牲中间。
+ */
+export const COMPACT_USER_MESSAGE_HEAD_TOKENS = 2_000;
+
+/**
+ * micro 压缩的单条 tool_result 最小正文 token 门槛（默认 100）。
+ * 低于此值的结果清掉省不下什么（还要塞一条占位文本），净收益接近零甚至为负，
+ * 白白击穿缓存前缀并丢掉可能有用的短结果（如 exit code、单行路径）。
+ */
+export const MICRO_MIN_CONTENT_TOKENS = 100;
+
+/**
+ * 保真块占「被压缩段」token 的上限份额（默认 0.6）。
+ * 超过就说明被压缩段太小、原话几乎就是全部内容，搬进保真块等于原地搬运而非压缩，
+ * 此时退回纯摘要形态。真实长会话里 older 段含大量 assistant 输出与工具结果，
+ * 用户原话占比通常远低于此，守卫不会触发。
+ */
+export const USER_BLOCK_MAX_SHARE = 0.6;
 
 /**
  * 每张图片按固定 token 常数估算。
@@ -13,29 +43,45 @@ const CLEARED_PLACEHOLDER = '[旧工具结果已清理以节省上下文]';
 const PER_IMAGE_TOKENS = 1500;
 
 /**
+ * 文本 token 分桶估算：ASCII 字符约 4 个/token，非 ASCII（CJK/全角/emoji 等）约 1 个/token。
+ * 比一刀切的 chars/3 更贴近真实分词——chars/3 对中文偏低、对英文偏高。
+ * 纯函数，仅按 code point < 128 分桶，不追求精确（真实 usage 优先，估算只作尾部补充/兜底）。
+ */
+export function estimateTextTokens(text: string): number {
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const ch of text) {
+    // 用 code point 判定（for..of 按 code point 迭代，emoji 等代理对算一个非 ASCII 字符）
+    if (ch.codePointAt(0)! < 128) ascii++;
+    else nonAscii++;
+  }
+  return Math.ceil(ascii / 4) + nonAscii;
+}
+
+/**
  * 粗略估算消息占用的 token 数。用于压缩阈值判断，不追求精确。
- * 启发式：文本按序列化后的字符数 / 3（CJK 约 1-2 字符/token、ASCII 约 4，取折中）；
+ * 启发式：文本按序列化后的字符数分桶（见 estimateTextTokens：ASCII÷4 + 非 ASCII×1）；
  * 图片块不按 base64/stepref 字符数算，改按 PER_IMAGE_TOKENS 常数（见上）。
  * 优先用 provider 返回的真实 usage（见 usageTotalTokens），本地估算只作尾部补充/兜底。
  */
 export function estimateTokens(messages: readonly StoredMessage[]): number {
-  let chars = 0;
+  let textTokens = 0;
   let images = 0;
   for (const m of messages) {
     const c = m.message.content;
     if (typeof c === 'string') {
-      chars += c.length;
+      textTokens += estimateTextTokens(c);
       continue;
     }
     for (const block of c) {
       if (block.type === 'image') {
         images++;
       } else {
-        chars += JSON.stringify(block).length;
+        textTokens += estimateTextTokens(JSON.stringify(block));
       }
     }
   }
-  return Math.ceil(chars / 3) + images * PER_IMAGE_TOKENS;
+  return textTokens + images * PER_IMAGE_TOKENS;
 }
 
 /**
@@ -96,6 +142,10 @@ export interface MicroCompactCacheGate {
  * 只改内层 message 的正文、不删消息、不动信封元数据，tool_use↔tool_result 配对结构不变。
  * 返回新数组，不改动入参。
  *
+ * 只清正文估算 ≥ minContentTokens（默认 100）的块：更小的结果清掉几乎省不下 token
+ * （还要塞一条占位文本），净收益接近零，却白白丢掉可能有用的短结果（exit code、单行路径）
+ * 并击穿缓存前缀。
+ *
  * prompt cache 注意：原地改写历史内容会使该位置之后的缓存前缀全部失效——这不是「对缓存友好」的操作。
  * 故传入 cacheGate 时，仅当缓存已冷（距上次活动 ≥ cacheColdMs）才执行改写；缓存仍热时跳过（返回
  * clearedCount:0），把压缩让给 fullCompact（它替换头部并重建同构前缀，不额外击穿热缓存）。
@@ -105,6 +155,7 @@ export function microCompact(
   messages: StoredMessage[],
   keepRecent = 6,
   cacheGate?: MicroCompactCacheGate,
+  minContentTokens = MICRO_MIN_CONTENT_TOKENS,
 ): MicroCompactResult {
   // 缓存仍热：跳过原地改写，避免击穿热前缀（交给 fullCompact 重建）
   if (cacheGate !== undefined) {
@@ -122,12 +173,12 @@ export function microCompact(
     if (msg.role !== 'user' || !Array.isArray(msg.content)) return sm;
     let changed = false;
     const content = msg.content.map((block) => {
-      if (block.type === 'tool_result' && block.content !== CLEARED_PLACEHOLDER) {
-        clearedCount++;
-        changed = true;
-        return { ...block, content: CLEARED_PLACEHOLDER };
-      }
-      return block;
+      if (block.type !== 'tool_result' || block.content === CLEARED_PLACEHOLDER) return block;
+      // 净收益门槛：小结果不值得清（省不下 token，还丢信息 + 击穿缓存）
+      if (estimateTextTokens(JSON.stringify(block.content ?? '')) < minContentTokens) return block;
+      clearedCount++;
+      changed = true;
+      return { ...block, content: CLEARED_PLACEHOLDER };
     });
     return changed ? { ...sm, message: { ...msg, content } } : sm;
   });
@@ -153,11 +204,260 @@ function safeCutoff(messages: StoredMessage[], desired: number): number {
 }
 
 /**
+ * 压缩时该 origin 的消息是否算「用户真实输入」（保真保留的候选）。
+ *
+ * `user` 是本轮真人输入；`user_verbatim` 是**上一轮压缩保真下来的原话**——必须一并收，
+ * 否则原话只能活过一轮压缩：第二轮时它已不是 `user`，会被当普通内容喂进摘要变成二次转述
+ * （实测过：第一轮路径原文还在，第二轮就没了）。收了它，衰减才由 token 预算竞争决定
+ * （越旧越可能被挤出），而不是由结构一刀切。
+ *
+ * 其余一律不收：tool 是结果回灌、injection 是系统注入的 reminder（含上一轮的省略提示，
+ * 每轮重新生成、不累积）、compaction_summary 是摘要、assistant 是模型自己的话。
+ */
+export function isCompactableUserOrigin(origin: MessageOrigin): boolean {
+  return origin === 'user' || origin === 'user_verbatim';
+}
+
+/**
+ * 纯确认语词表：整条消息（归一后）恰好等于其中一项时不占保真预算。
+ *
+ * 这类消息信息量为零，却会占预算，更要紧的是**稀释注意力**——模型看到一列保真消息
+ * 会默认它们都重要，真正的关键信息被淹在「再继续」旁边。
+ *
+ * 只做**整条全等**匹配，不做包含/前缀匹配，也不用长度阈值：宁可留噪音，不可丢信号。
+ * 「用方案 B」这类同样很短却载有决策的消息必须活下来。
+ * （预算宽松时这道过滤可有可无；但溢出递进收缩会把预算压到 0.35 倍，此时它才见效。）
+ */
+const ACK_ONLY_PHRASES = new Set([
+  '继续', '继续吧', '接着', '接着说', '好', '好的', '好吧', '行', '行吧', '可以', '嗯', '嗯嗯',
+  '对', '对的', '是', '是的', '没问题', '知道了', '明白', '收到',
+  'ok', 'okay', 'yes', 'y', 'ya', 'yeah', 'sure', 'go', 'go on', 'continue', 'next', 'thanks', 'thx',
+]);
+
+/** 归一化后判断是否为纯确认语（去首尾空白与尾部标点、转小写）。空内容同样视为无信息。 */
+export function isAckOnlyText(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/[。．.!！?？~～、,，;；:：\s]+$/u, '')
+    .toLowerCase();
+  if (normalized === '') return true;
+  return ACK_ONLY_PHRASES.has(normalized);
+}
+
+/** 抽取一条消息里的纯文本（图片降级成 marker，工具块忽略）。 */
+function extractUserText(content: Anthropic.MessageParam['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((b: Anthropic.ContentBlockParam) => {
+      if (b.type === 'text') return b.text;
+      if (b.type === 'image') return serializeImage(b);
+      return '';
+    })
+    .filter((s) => s !== '')
+    .join('\n');
+}
+
+/**
+ * 按 token 预算从文本尾部保留（丢头部）。用于最近消息：越靠后的表述越接近当前意图。
+ * 按字符二分逼近（estimateTextTokens 对字符数单调不减），返回保留下来的后缀。
+ */
+function truncateTextFromEnd(text: string, maxTokens: number): string {
+  if (maxTokens <= 0) return '';
+  if (estimateTextTokens(text) <= maxTokens) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (estimateTextTokens(text.slice(text.length - mid)) <= maxTokens) lo = mid;
+    else hi = mid - 1;
+  }
+  return text.slice(text.length - lo);
+}
+
+/** 按 token 预算从文本头部保留（丢尾部）。用于最早消息：任务定义通常在开头。 */
+function truncateTextFromStart(text: string, maxTokens: number): string {
+  if (maxTokens <= 0) return '';
+  if (estimateTextTokens(text) <= maxTokens) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (estimateTextTokens(text.slice(0, mid)) <= maxTokens) lo = mid;
+    else hi = mid - 1;
+  }
+  return text.slice(0, lo);
+}
+
+/** 截断标记：让模型知道这条原话不完整、缺失部分去摘要里找。 */
+export const TRUNCATED_HEAD_SUFFIX = '\n…（本条后半已截断，其内容见交接摘要）';
+export const TRUNCATED_TAIL_PREFIX = '…（本条前半已截断，其内容见交接摘要）\n';
+
+/**
+ * 落成保真消息：origin 统一为 `user_verbatim`（可跨轮继承），保留原 id/ts 便于追溯。
+ * text 省略时原消息内容原样保留（含图片块）；给了 text 则内容替换为纯文本
+ * （截断只能作用于文本，图片无法部分截断）。
+ */
+function toVerbatim(sm: StoredMessage, text?: string): StoredMessage {
+  if (text === undefined) return { ...sm, origin: 'user_verbatim' };
+  return { ...sm, message: { role: 'user', content: text }, origin: 'user_verbatim' };
+}
+
+/** 用户原话保真选择结果（元素为可直接入 messages 的保真消息）。 */
+export interface UserMessageSelection {
+  /** 最早的若干条（head 预算内）。 */
+  head: StoredMessage[];
+  /** 最近的若干条（tail 预算内）。 */
+  tail: StoredMessage[];
+  /** 是否发生了信息损失（中段丢弃或单条截断）。 */
+  elided: boolean;
+  /** 丢失的估算 token 数 = 候选总量 - 实际保留量（含被截断掉的部分）。 */
+  omittedTokens: number;
+}
+
+/**
+ * 在 token 预算内保真挑选用户原始消息，返回可直接入 messages 的保真消息。
+ *
+ * 规则：滤掉纯确认语 → 预算够则全留 → 不够则「最早 headTokens + 最近剩余预算」，
+ * 单条超预算按方向截断（head 留开头、tail 留结尾）而非整条丢弃。
+ * tail 边界那条被截掉的**前缀会回收进 head 候选**：
+ * 一条巨大的 paste 因此能同时保住开头与结尾、只丢中间，而不是只剩个尾巴。
+ * 纯函数，便于单测。
+ */
+export function selectCompactionUserMessages(
+  messages: readonly StoredMessage[],
+  maxTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  headTokens = COMPACT_USER_MESSAGE_HEAD_TOKENS,
+): UserMessageSelection {
+  const empty: UserMessageSelection = { head: [], tail: [], elided: false, omittedTokens: 0 };
+  if (maxTokens <= 0) return empty;
+
+  // 候选：真实用户输入（含上一轮保真下来的），去掉纯确认语与空内容
+  const candidates: { sm: StoredMessage; text: string; tokens: number }[] = [];
+  for (const sm of messages) {
+    if (!isCompactableUserOrigin(sm.origin)) continue;
+    const text = extractUserText(sm.message.content).trim();
+    if (text === '' || isAckOnlyText(text)) continue;
+    candidates.push({ sm, text, tokens: estimateTextTokens(text) });
+  }
+  if (candidates.length === 0) return empty;
+
+  const total = candidates.reduce((sum, c) => sum + c.tokens, 0);
+  if (total <= maxTokens) {
+    return { head: [], tail: candidates.map((c) => toVerbatim(c.sm)), elided: false, omittedTokens: 0 };
+  }
+
+  // 预算不足：先从最近往前填 tail（留 headBudget 给最早消息），再从最早往后填 head
+  const headBudget = Math.min(Math.max(headTokens, 0), maxTokens);
+  let tailRemaining = maxTokens - headBudget;
+  const tail: StoredMessage[] = [];
+  let headEndExclusive = candidates.length;
+  let boundaryDroppedPrefix: { sm: StoredMessage; text: string; tokens: number } | undefined;
+  for (let i = candidates.length - 1; i >= 0 && tailRemaining > 0; i--) {
+    const c = candidates[i]!;
+    if (c.tokens <= tailRemaining) {
+      tail.push(toVerbatim(c.sm));
+      tailRemaining -= c.tokens;
+      headEndExclusive = i;
+      continue;
+    }
+    // 单条超出剩余预算：留其结尾（当前意图在末尾）
+    const keptSuffix = truncateTextFromEnd(c.text, tailRemaining);
+    if (keptSuffix !== '') tail.push(toVerbatim(c.sm, TRUNCATED_TAIL_PREFIX + keptSuffix));
+    headEndExclusive = i;
+    // 被丢掉的前缀回收进 head 候选：大 paste 的开头同样有价值（任务定义、函数签名常在头部）
+    const droppedPrefix = c.text.slice(0, c.text.length - keptSuffix.length);
+    if (droppedPrefix !== '') {
+      boundaryDroppedPrefix = { sm: c.sm, text: droppedPrefix, tokens: estimateTextTokens(droppedPrefix) };
+    }
+    break;
+  }
+  tail.reverse();
+
+  const headCandidates = candidates.slice(0, headEndExclusive);
+  if (boundaryDroppedPrefix !== undefined) headCandidates.push(boundaryDroppedPrefix);
+  const head: StoredMessage[] = [];
+  let headRemaining = headBudget;
+  for (const c of headCandidates) {
+    if (headRemaining <= 0) break;
+    if (c.tokens <= headRemaining) {
+      head.push(toVerbatim(c.sm, c.text));
+      headRemaining -= c.tokens;
+      continue;
+    }
+    const keptPrefix = truncateTextFromStart(c.text, headRemaining);
+    if (keptPrefix !== '') head.push(toVerbatim(c.sm, keptPrefix + TRUNCATED_HEAD_SUFFIX));
+    break;
+  }
+
+  // 丢失量 = 候选总量 - 实际保留量，含被截断掉的部分（只算整条丢弃会低报）
+  let kept = 0;
+  for (const sm of [...head, ...tail]) kept += estimateTextTokens(extractUserText(sm.message.content));
+  return { head, tail, elided: true, omittedTokens: Math.max(0, total - kept) };
+}
+
+/**
+ * 中段省略提示消息。用 `injection` origin：下一轮压缩不会把它当用户输入收集，
+ * 因此每轮重新生成、不层层累积。
+ */
+export function createElisionMessage(omittedTokens: number): StoredMessage {
+  const text = [
+    '<system-reminder>',
+    `压缩时省略了约 ${omittedTokens} tokens 的用户消息：上方是最早的用户输入，下方是最近的用户输入，` +
+      '中间部分已丢弃，其内容由下方交接摘要覆盖。若下一步依赖被省略段的细节，先向用户确认，不要臆测。',
+    '</system-reminder>',
+  ].join('\n');
+  return stored({ role: 'user', content: text }, 'injection');
+}
+
+/** 摘要请求的 system prompt：定调「第一人称交接笔记」而非第三方报告。 */
+const SUMMARY_SYSTEM =
+  '你正在为「未来的自己」写一份交接笔记：这段对话即将被清空，只有你写下的内容能延续。' +
+  '用第一人称、现在时写，像自己在推演下一步，不要写成第三方汇报。输出中文纯文本，不要调用任何工具。';
+
+/**
+ * 摘要请求的指令块（handoff 交接指令）。
+ * 六条要求都在防一类具体的压缩后事故：意图漂移、已决选择被重开、结果值丢失需重跑、
+ * 未知被当成已知、计划退化成只剩下一步、未验证声明被当成事实。
+ */
+const SUMMARY_INSTRUCTION = [
+  '写一份交接笔记，让清空历史后的你能无缝继续。必须覆盖以下几点，但不要套用僵硬的小标题，让结构贴合任务本身：',
+  '',
+  '1. 当前请求到底要什么：你对其意图的理解，以及你已经消解掉的歧义。原话已在上方保真保留，不要复述；' +
+    '但保真受 token 预算限制、较早的原话可能已被挤出或截断，凡是你判断下一步仍要依赖的关键事实' +
+    '（路径、命名、接口、约束、数字），无论上方是否还在，都要在笔记里写清一遍；' +
+    '若有多个请求并行，说清哪个主导下一步。',
+  '2. 现在生效的约束：用户偏好、项目规则、环境与工具限制。把「已经定下的决策（选了什么、为什么）」' +
+    '和「仍然待定的问题」分开写，避免下一轮悄悄重开已关闭的选择，或把未定的当成已定。',
+  '3. 已经做了什么，要高保真：执行过的确切命令、动过的确切文件路径、每一步成功还是失败；' +
+    '更要留结果本身——返回的具体值、关键行或报错原文、查到的 schema 或签名，因为重跑一遍可能很慢甚至不可能。' +
+    '代码只留最终可用版本，中间尝试和已修掉的错误一律丢弃。',
+  '4. 你仍然不知道什么：下一步依赖但这段对话从未确认过的东西——提到却没读过的文件、假设却没验证的接口、' +
+    '用户还没回答的问题。把这些缺口点名，让下一轮去查而不是去猜。',
+  '5. 前向计划，这里值得多投入：你现在掌握的上下文比之后任何时候都多，下一轮只会更少。' +
+    '给出确切的下一条命令或工具调用，并且不要停在下一步——把剩下的步骤序列、这些步骤上你已经做好的决定、' +
+    '你已能预见的障碍与应对，以及现在就能定下来的产出（确切的补丁、查询或最终答案的形态）一并写下。',
+  '6. 对不确定性诚实：若之前声称「测试通过」「已修好」「文件已创建」但从未验证，明确写成未验证，' +
+    '不要当作事实，下一轮依赖前必须重新核对。',
+  '',
+  'TODO 清单会从实时来源自动附在笔记下方，不要抄写它；清单装不下的是任务之间的推理——' +
+  '为什么某项被重排或放弃、某项的决定如何约束另一项，记这些。',
+  '',
+  '保持简洁并与任务规模成比例：多步长任务值得详细，接近收尾的琐碎交流一两句就够，不要注水。',
+  '只输出笔记正文。',
+].join('\n');
+
+/**
  * 全量压缩：把除最近 keepRecent 条外的较旧对话交给模型总结成一段 handoff 摘要，
- * 用摘要替换被压缩部分，保留最近消息。需要一次模型调用。
+ * 用「用户原话保真块 + 摘要」替换被压缩部分，保留最近消息。需要一次模型调用。
+ *
+ * 保真块（见 selectCompactionUserMessages）是对「摘要转述丢失原始意图」的正面修补：
+ * 被压缩段里的用户原话在 token 预算内逐条原样保留，排在摘要之前，摘要垫在最后
+ * （模型读完原话后最后看到的是「怎么继续」，注意力落在行动上）。
+ *
  * 切点经 safeCutoff 校正，绝不拆散 tool_use↔tool_result。
  * 若无可压缩内容、无安全切点或摘要失败，原样返回（返回同引用，供调用方判断未压缩）。
- * model 为压缩摘要专用模型覆盖（大小模型协同），省略时用 provider 构造模型（行为与之前一致）。
+ * model 为压缩摘要专用模型覆盖（大小模型协同），省略时用 provider 构造模型。
+ * userBudget 覆盖用户原话保真预算（省略 = COMPACT_USER_MESSAGE_MAX_TOKENS）。
  */
 export async function fullCompact(
   provider: ChatProvider,
@@ -165,6 +465,7 @@ export async function fullCompact(
   keepRecent = 6,
   todos?: readonly { title: string; status: string }[],
   model?: string,
+  userBudget?: { maxTokens?: number; headTokens?: number },
 ): Promise<StoredMessage[]> {
   const desired = messages.length - keepRecent;
   if (desired <= 1) return messages; // 太短，不值得压缩
@@ -174,16 +475,21 @@ export async function fullCompact(
   const older = messages.slice(0, cutoff);
   const recent = messages.slice(cutoff);
 
+  // 用户原话保真：只取被压缩掉的 older 段（recent 段本身完整保留，无需重复占预算）
+  const selection = selectCompactionUserMessages(
+    older,
+    userBudget?.maxTokens ?? COMPACT_USER_MESSAGE_MAX_TOKENS,
+    userBudget?.headTokens ?? COMPACT_USER_MESSAGE_HEAD_TOKENS,
+  );
+
   const summaryPrompt =
-    '以下是一段较早的对话历史。请为接手的另一个 AI 助手写一段简洁的中文交接摘要，覆盖：' +
-    '当前进度与关键决策、重要约束与用户偏好、尚未完成的工作（明确的下一步）、' +
-    '以及需要的关键数据 / 文件路径 / 引用。只输出摘要正文：\n\n' +
+    `${SUMMARY_INSTRUCTION}\n\n--- 以下是即将被清空的对话历史 ---\n\n` +
     older.map((m) => `${m.message.role}: ${serializeContent(m.message.content)}`).join('\n');
 
   let summary = '';
   try {
     const stream = provider.stream({
-      system: '你是一个对话摘要器，输出紧凑、信息完整的中文交接摘要。',
+      system: SUMMARY_SYSTEM,
       tools: [],
       messages: [{ role: 'user', content: summaryPrompt }],
       model,
@@ -200,13 +506,40 @@ export async function fullCompact(
 
   // TODO 本体存独立 store（不占 messages），压缩不丢；把当前清单拼进摘要尾部，让压缩后模型立刻看到进度
   const todoBlock = todos !== undefined ? renderTodoList(todos) : '';
-  const finalSummary = todoBlock === '' ? summary : `${summary.trim()}\n\n${todoBlock}`;
+  const summaryText = [`[早期对话摘要]\n${summary.trim()}`, todoBlock].filter((s) => s !== '').join('\n\n');
 
-  return [
-    stored({ role: 'user', content: `[早期对话摘要]\n${finalSummary}` }, 'compaction_summary'),
-    stored({ role: 'assistant', content: '已了解上述摘要，继续。' }, 'assistant'),
-    ...recent,
-  ];
+  /**
+   * 产物结构：保真原话（独立 user_verbatim 消息）→ 省略提示 → 摘要 → assistant 确认 → recent。
+   *
+   * 原话作为**独立消息**而非摘要正文里的一段文本，是跨轮保真的前提：它们的 origin 是
+   * user_verbatim，下一轮压缩的 isCompactableUserOrigin 认得，于是能继续参选；
+   * 若把原话渲染进摘要消息，下一轮只看到一条 compaction_summary，原话必然退化成二次转述。
+   *
+   * 摘要排在原话之后：模型读完原话序列，最后看到的是「怎么继续」，注意力落在行动上。
+   */
+  const build = (withVerbatim: boolean): StoredMessage[] => {
+    const verbatim = withVerbatim
+      ? selection.elided
+        ? [...selection.head, createElisionMessage(selection.omittedTokens), ...selection.tail]
+        : [...selection.head, ...selection.tail]
+      : [];
+    return [
+      ...verbatim,
+      stored({ role: 'user', content: summaryText }, 'compaction_summary'),
+      stored({ role: 'assistant', content: '已了解上述摘要，继续。' }, 'assistant'),
+      ...recent,
+    ];
+  };
+
+  // 净收益守卫：保真消息不该反过来主导被压缩段。被压缩段很小时（极端情形：只压掉两条消息，
+  // 却把其中的用户原话整条搬出来），保真的成本会吃掉摘要省下的量，压缩退化成搬运。
+  // 此时退回纯摘要形态。真实场景下 older 段动辄几万 token、用户原话占比很小，守卫不会触发。
+  const verbatimCount = selection.head.length + selection.tail.length;
+  const olderTokens = estimateTokens(older);
+  const verbatimTokens = estimateTokens([...selection.head, ...selection.tail]);
+  const worthKeeping = verbatimCount > 0 && verbatimTokens <= olderTokens * USER_BLOCK_MAX_SHARE;
+
+  return build(worthKeeping);
 }
 
 /** 把 TODO 清单渲染成 markdown，供压缩摘要尾部拼接（TODO 本体存 store，压缩不丢）。 */

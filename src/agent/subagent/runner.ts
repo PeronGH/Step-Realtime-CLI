@@ -36,6 +36,8 @@ export interface SubagentRunnerDeps {
   compaction: CompactionThresholds;
   /** 压缩摘要专用模型覆盖（来自 config.compaction.model）；省略 = 用 provider 默认模型。 */
   compactionModel?: string;
+  /** 用户原话保真预算覆盖（来自 config.compaction.userMessage*）；省略 = 用 compact.ts 默认。 */
+  userMessageBudget?: { maxTokens?: number; headTokens?: number };
   /** 会话级共享计数器（外置于 runner 实例，跨轮累计）。 */
   sessionCounter: SubagentSessionCounter;
   /** skill 注册表（组合根注入）：子 agent 共享，system 拼清单 + ctx 带 skills，使其 skill 工具可用。 */
@@ -121,6 +123,7 @@ export function createSubagentRunner(deps: SubagentRunnerDeps): RunSubagentFn {
         model: def.model,
         compaction: deps.compaction, // 子 agent 同样享循环内压缩兜底
         compactionModel: deps.compactionModel,
+        userMessageBudget: deps.userMessageBudget,
       })) {
         if (ev.type === 'tool_start') progress({ kind: 'tool', name: ev.name });
         else if (ev.type === 'error') progress({ kind: 'error', message: ev.message });

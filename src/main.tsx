@@ -416,6 +416,10 @@ async function runPrint(prompt: string): Promise<void> {
         reservedTokens: config.compaction.reservedTokens,
       },
       compactionModel: config.compaction.model,
+      userMessageBudget: {
+        maxTokens: config.compaction.userMessageMaxTokens,
+        headTokens: config.compaction.userMessageHeadTokens,
+      },
       sessionCounter: { spawned: 0 }, // 非交互单次运行，计数器随进程即可
       skills: ctx.skills, // 子 agent 共享 skill
       onEvent: (_id, ev) => {
@@ -438,6 +442,10 @@ async function runPrint(prompt: string): Promise<void> {
       reservedTokens: config.compaction.reservedTokens,
     },
     compactionModel: config.compaction.model,
+    userMessageBudget: {
+      maxTokens: config.compaction.userMessageMaxTokens,
+      headTokens: config.compaction.userMessageHeadTokens,
+    },
     todos: todosStore.items,
   })) {
     emit(ev);

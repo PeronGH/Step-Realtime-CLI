@@ -44,9 +44,13 @@ const PREVIEW_MAX = 200;
 /**
  * 抽取首条 user 消息的纯文本（string 直接用；数组拼接所有 text 块），折叠空白/换行为单空格并 trim。
  * 无 user 消息或纯空返回 undefined。deriveTitle / derivePreview 共用。
+ *
+ * 也接受 `user_verbatim`（压缩保真下来的用户原话）：长会话被压缩后，最早的真人输入已不在
+ * 历史里，此时保真下来的第一条恰好就是它——正是最好的标题来源。若只认 `user`，
+ * 压缩过的会话标题会退化成 undefined 或取到很晚的一条消息。
  */
 function firstUserText(messages: StoredMessage[]): string | undefined {
-  const first = messages.find((m) => m.origin === 'user');
+  const first = messages.find((m) => m.origin === 'user' || m.origin === 'user_verbatim');
   if (first === undefined) return undefined;
   const content = first.message.content;
   let text: string;
