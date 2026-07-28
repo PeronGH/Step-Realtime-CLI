@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 as pathWin32 } from 'node:path';
 
 /**
  * 跨平台 shell 解析：为 bash 工具与 system prompt 提供统一的解释器选择。
@@ -96,9 +96,11 @@ function gitBashFromGitExe(): string | undefined {
   if (!gitExe) return undefined;
 
   // git.exe 通常在 <root>\cmd\git.exe 或 <root>\bin\git.exe
-  const parent = join(gitExe, '..', '..');
-  for (const sub of ['bin', join('usr', 'bin')]) {
-    const cand = join(parent, sub, 'bash.exe');
+  // 此处逻辑只在 Windows 语义下跑，但单测会 mock process.platform='win32' 后跨平台运行，
+  // 所以必须用 Windows 路径 join，避免在 POSIX 上把反斜杠当成普通字符拼出混合分隔符。
+  const parent = pathWin32.join(gitExe, '..', '..');
+  for (const sub of ['bin', pathWin32.join('usr', 'bin')]) {
+    const cand = pathWin32.join(parent, sub, 'bash.exe');
     if (existsSync(cand)) return cand;
   }
 
@@ -123,8 +125,8 @@ function gitBashFromGitExe(): string | undefined {
       } else {
         root = head.filter(Boolean).join('\\');
       }
-      for (const sub of ['bin', join('usr', 'bin')]) {
-        const cand = join(root, sub, 'bash.exe');
+      for (const sub of ['bin', pathWin32.join('usr', 'bin')]) {
+        const cand = pathWin32.join(root, sub, 'bash.exe');
         if (existsSync(cand)) return cand;
       }
     }
