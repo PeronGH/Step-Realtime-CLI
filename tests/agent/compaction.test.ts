@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import {
+  billedTokens,
   createElisionMessage,
   estimateTextTokens,
   estimateTokens,
@@ -119,6 +120,33 @@ describe('usageTotalTokens', () => {
 
   it('缺失字段按 0 处理', () => {
     expect(usageTotalTokens({ input_tokens: 10, output_tokens: 5 } as Anthropic.Usage)).toBe(15);
+  });
+});
+
+describe('billedTokens（计费口径：input − cache_read + output）', () => {
+  it('cache_read 全命中：增量只剩 output', () => {
+    expect(
+      billedTokens({
+        input_tokens: 100,
+        cache_read_input_tokens: 100,
+        output_tokens: 20,
+      } as Anthropic.Usage),
+    ).toBe(20);
+  });
+
+  it('无 cache 字段：input + output', () => {
+    expect(billedTokens({ input_tokens: 100, output_tokens: 20 } as Anthropic.Usage)).toBe(120);
+  });
+
+  it('混合：input 扣 cache_read 后加 output，cache_creation 不计入', () => {
+    expect(
+      billedTokens({
+        input_tokens: 100,
+        cache_read_input_tokens: 40,
+        cache_creation_input_tokens: 25,
+        output_tokens: 10,
+      } as Anthropic.Usage),
+    ).toBe(70);
   });
 });
 

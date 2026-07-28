@@ -29,3 +29,18 @@ export function useSpinnerFrame(active: boolean, frames: string[], intervalMs = 
   if (!active) return frames[0] ?? '';
   return frames[Math.floor(Date.now() / intervalMs) % frames.length] ?? frames[0] ?? '';
 }
+
+/**
+ * 墙钟 tick：active 为真时按 intervalMs 触发 re-render（时长按秒跳动用），
+ * 值本身不参与展示（时长由 startedAt 现算）。纪律同 useSpinnerFrame：
+ * active 才起 setInterval，active 转假或卸载时立即 clearInterval，空闲零成本。
+ */
+export function useNowTick(active: boolean, intervalMs = 1000): void {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setTick((t) => t + 1), intervalMs);
+    return () => clearInterval(timer);
+  }, [active, intervalMs]);
+}

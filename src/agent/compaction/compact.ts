@@ -148,6 +148,15 @@ export function usageTotalTokens(usage: Anthropic.Usage): number {
   );
 }
 
+/**
+ * 本轮请求的计费 token 增量：input − cache_read + output（缓存命中不计成本）。
+ * 与 usageTotalTokens（上下文占用快照）不同，这是逐轮单调递增的成本口径，
+ * goal 预算计量与子 agent 卡片 token 展示共用此公式。
+ */
+export function billedTokens(usage: Anthropic.Usage): number {
+  return (usage.input_tokens ?? 0) - (usage.cache_read_input_tokens ?? 0) + (usage.output_tokens ?? 0);
+}
+
 /** 压缩触发阈值。 */
 export interface CompactionThresholds {
   /** 模型上下文上限（token）。 */

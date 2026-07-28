@@ -3,6 +3,7 @@ import { t } from '../i18n.js';
 import { toAnthropicTools } from '../tools/index.js';
 import type { ToolContext } from '../tools/types.js';
 import {
+  billedTokens,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   estimateTokens,
   fullCompact,
@@ -212,7 +213,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'max_tokens': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
+          yield {
+            type: 'usage',
+            totalTokens: usageTotalTokens(outcome.usage),
+            measuredLength: messages.length,
+            billedDelta: billedTokens(outcome.usage),
+          };
         }
         // 截断提示（终止 + 明确提示，不自动续写）：带上当前上限便于用户调整。
         // thinkingExhausted：思考吃满预算、正文零输出——给「调 max_tokens / 降档」的确定性提示，
@@ -233,7 +239,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'end_turn': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
+          yield {
+            type: 'usage',
+            totalTokens: usageTotalTokens(outcome.usage),
+            measuredLength: messages.length,
+            billedDelta: billedTokens(outcome.usage),
+          };
         }
         // goal 等自主续接：不在本 run 内续跑，产出 continuation 事件回 App 层，由 App 发起下一轮 run
         const cont = await resolveContinuation(hooks);
@@ -245,7 +256,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'tool_use': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
+          yield {
+            type: 'usage',
+            totalTokens: usageTotalTokens(outcome.usage),
+            measuredLength: messages.length,
+            billedDelta: billedTokens(outcome.usage),
+          };
         }
         // 循环内压缩：用真实 usage（+ 本回合新增消息的尾部估算）判断，超阈值先 micro 再 full
         if (compaction !== undefined) {

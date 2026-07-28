@@ -63,6 +63,7 @@ describe('chrome 面板长行截断（wrap=truncate）', () => {
       status: 'running',
       toolCount: 3,
       activity: 'e'.repeat(150),
+      startedAt: Date.now(),
     };
     const { lastFrame } = render(<AgentGroup agents={[agent]} />);
     const out = lastFrame() ?? '';

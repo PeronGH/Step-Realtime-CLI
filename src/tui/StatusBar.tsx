@@ -3,16 +3,7 @@ import { Box, Text } from 'ink';
 import type { PermissionMode } from '../agent/permission/mode.js';
 import type { GoalStatus } from '../agent/goal/mode.js';
 import { formatElapsed } from './elapsed.js';
-
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${trimZero(n / 1_000_000)}M`;
-  if (n >= 1000) return `${trimZero(n / 1000)}k`;
-  return String(n);
-}
-
-function trimZero(x: number): string {
-  return x.toFixed(1).replace(/\.0$/, '');
-}
+import { formatCount } from './duration.js';
 
 /**
  * 路径缩短：home 前缀替换为 ~；段数 > 3 时只保留尾部 3 段并加 …/ 前缀；

@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { t } from '../../i18n.js';
+import { billedTokens } from '../compaction/compact.js';
 
 /** goal（自主目标）状态：active / paused / blocked（complete 瞬态即清）。 */
 export type GoalStatus = 'active' | 'paused' | 'blocked';
@@ -89,7 +90,7 @@ export class GoalMode {
    */
   addTokens(usage: Anthropic.Usage): void {
     if (this.goal === null || this.goal.status !== 'active') return;
-    this.goal.tokensUsed += usage.input_tokens - (usage.cache_read_input_tokens ?? 0) + usage.output_tokens;
+    this.goal.tokensUsed += billedTokens(usage);
   }
 
   /** 哪种预算耗尽（turns / tokens），都没超返回 null。 */

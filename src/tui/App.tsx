@@ -1837,7 +1837,14 @@ export function App({
           setSubagents((prev) => {
             const updated = [...prev];
             if (ev.kind === 'start') {
-              updated.push({ id: sid, type: ev.subagentType, description: ev.description, status: 'running', toolCount: 0 });
+              updated.push({
+                id: sid,
+                type: ev.subagentType,
+                description: ev.description,
+                status: 'running',
+                toolCount: 0,
+                startedAt: Date.now(),
+              });
               return updated;
             }
             const idx = updated.findIndex((a) => a.id === sid);
@@ -1847,8 +1854,11 @@ export function App({
               updated[idx] = { ...a, toolCount: a.toolCount + 1, activity: ev.name };
             } else if (ev.kind === 'error') {
               updated[idx] = { ...a, activity: t('app.agent.activityError', { message: ev.message }) };
+            } else if (ev.kind === 'usage') {
+              // runner 已逐轮累计，这里只赋值（不加法）
+              updated[idx] = { ...a, tokens: ev.tokens };
             } else if (ev.kind === 'end') {
-              updated[idx] = { ...a, status: ev.isError ? 'error' : 'done' };
+              updated[idx] = { ...a, status: ev.isError ? 'error' : 'done', endedAt: Date.now() };
             }
             return updated;
           });

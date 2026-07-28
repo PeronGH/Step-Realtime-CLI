@@ -171,6 +171,98 @@ describe('createSubagentRunner', () => {
   });
 });
 
+describe('runner 消费 usage 事件（计费口径累计上抛）', () => {
+  it('连续两轮带 billedDelta → 累计值递增的 usage progress（缓存命中不计成本）', async () => {
+    const events: SubagentProgressEvent[] = [];
+    const { provider } = makeFakeProvider([
+      {
+        textChunks: [],
+        finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})],
+        usage: { input_tokens: 100, cache_read_input_tokens: 40, output_tokens: 10 } as Anthropic.Usage,
+      },
+      {
+        textChunks: [],
+        finalContent: [textBlock(LONG)],
+        usage: { input_tokens: 200, output_tokens: 20 } as Anthropic.Usage,
+      },
+    ]);
+    const run = createSubagentRunner(deps(provider, (_id, e) => events.push(e)));
+    const r = await run({ subagentType: 'general', prompt: '干活', depth: 0 });
+    expect(r.isError).toBe(false);
+    // 第 1 轮 100−40+10=70；第 2 轮 200+20=220 → 累计 290
+    expect(events.filter((e) => e.kind === 'usage')).toEqual([
+      { kind: 'usage', tokens: 70 },
+      { kind: 'usage', tokens: 290 },
+    ]);
+  });
+
+  it('摘要过短追加轮的消耗连续累计（同一闭包 tokensUsed）', async () => {
+    const events: SubagentProgressEvent[] = [];
+    const { provider } = makeFakeProvider([
+      {
+        textChunks: [],
+        finalContent: [textBlock('短')], // <200 字，触发追加轮
+        usage: { input_tokens: 50, output_tokens: 5 } as Anthropic.Usage,
+      },
+      {
+        textChunks: [],
+        finalContent: [textBlock(LONG)],
+        usage: { input_tokens: 80, output_tokens: 30 } as Anthropic.Usage,
+      },
+    ]);
+    const run = createSubagentRunner(deps(provider, (_id, e) => events.push(e)));
+    const r = await run({ subagentType: 'general', prompt: '干活', depth: 0 });
+    expect(r.isError).toBe(false);
+    expect(r.summary).toBe(LONG);
+    // 追加轮（55 + 110 = 165）接着首轮累计，不重置
+    expect(events.filter((e) => e.kind === 'usage')).toEqual([
+      { kind: 'usage', tokens: 55 },
+      { kind: 'usage', tokens: 165 },
+    ]);
+  });
+
+  it('压缩后的估算 usage（无 billedDelta）不计入累计', async () => {
+    const events: SubagentProgressEvent[] = [];
+    const usage = { input_tokens: 1000, output_tokens: 10 } as Anthropic.Usage;
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})], usage },
+      { textChunks: [], finalContent: [toolUseBlock('c2', 'nonexistent_tool', {})], usage },
+      { textChunks: [], finalContent: [toolUseBlock('c3', 'nonexistent_tool', {})], usage },
+      { textChunks: [], finalContent: [toolUseBlock('c4', 'nonexistent_tool', {})], usage },
+      // fullCompact 摘要调用：质检门要求摘要相对被压缩量有最低信息量，给足长度避免触发重试
+      { textChunks: [], finalContent: [textBlock('x'.repeat(100))] },
+      { textChunks: [], finalContent: [textBlock(LONG)], usage }, // 压缩后下一轮 end_turn
+    ]);
+    // 极小阈值 + 长 prompt：第 4 轮 tool_use 后触发循环内压缩（消息 9 条，超过 KEEP_RECENT+1），
+    // 压缩后 loop 产出一条无 billedDelta 的估算 usage——runner 必须跳过它
+    const run = createSubagentRunner(
+      deps(provider, (_id, e) => events.push(e), {
+        compaction: { maxContextSize: 200, triggerRatio: 0.85, reservedTokens: 10 },
+      }),
+    );
+    const r = await run({ subagentType: 'general', prompt: 'x'.repeat(1200), depth: 0 });
+    expect(r.isError).toBe(false);
+    // 每轮真实 usage 计费 1000+10=1010；5 个真实回合 → 5 条递增的 usage progress。
+    // 若估算事件被计入，会多出一条且数值跳变（估算是全量快照不是增量）。
+    expect(events.filter((e) => e.kind === 'usage')).toEqual([
+      { kind: 'usage', tokens: 1010 },
+      { kind: 'usage', tokens: 2020 },
+      { kind: 'usage', tokens: 3030 },
+      { kind: 'usage', tokens: 4040 },
+      { kind: 'usage', tokens: 5050 },
+    ]);
+  });
+
+  it('provider 未回 usage → 不产生 usage progress（billedDelta 缺省时旧行为不变）', async () => {
+    const events: SubagentProgressEvent[] = [];
+    const { provider } = makeFakeProvider([{ textChunks: [], finalContent: [textBlock(LONG)] }]);
+    const run = createSubagentRunner(deps(provider, (_id, e) => events.push(e)));
+    const r = await run({ subagentType: 'general', prompt: '干活', depth: 0 });
+    expect(r.isError).toBe(false);
+    expect(events.filter((e) => e.kind === 'usage')).toHaveLength(0);
+  });
+});
+
 describe('runAgent allowedTools 守卫', () => {
   it('白名单外的工具调用被拒、不执行', async () => {
     const { provider } = makeFakeProvider([

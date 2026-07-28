@@ -110,6 +110,9 @@ export function createSubagentRunner(deps: SubagentRunnerDeps): RunSubagentFn {
     let hadError = false;
     let aborted = false;
     let lastCause: unknown;
+    // 累计计费 token（放 runImpl 闭包：摘要过短追加轮的第二次 run() 自然连续累计）；
+    // 只累计带 billedDelta 的真实 usage，压缩后的纯估算事件无增量可计、跳过。
+    let tokensUsed = 0;
     // 子 agent 剥离 goal 续接：复用主 hooks 会让子 agent 的 end_turn 触发主 goal 的 incrementTurn 污染计量；
     // Stop hook 续接对子 agent 也不适用（一次性语义在主会话层）
     const subHooks: LoopHooks = { ...deps.hooks };
@@ -131,6 +134,10 @@ export function createSubagentRunner(deps: SubagentRunnerDeps): RunSubagentFn {
       })) {
         if (ev.type === 'tool_start') progress({ kind: 'tool', name: ev.name });
         else if (ev.type === 'error') progress({ kind: 'error', message: ev.message });
+        else if (ev.type === 'usage' && ev.billedDelta !== undefined) {
+          tokensUsed += ev.billedDelta;
+          progress({ kind: 'usage', tokens: tokensUsed });
+        }
         if (ev.type === 'error') {
           hadError = true;
           // 保留原始错误对象：父侧调度层据此识别 429 做重排队（status 只存在于 error 对象上）

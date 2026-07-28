@@ -2,7 +2,7 @@ import { Box, Text } from 'ink';
 import { t } from '../i18n.js';
 import type { WorkflowStepEvent } from '../agent/workflow.js';
 import type { SubagentProgressEvent } from '../agent/events.js';
-import type { SubagentProgress } from './AgentGroup.js';
+import { formatSubagentStats, type SubagentProgress } from './AgentGroup.js';
 
 /** workflow 步骤面板中单个步骤的展示状态。 */
 export interface WorkflowStepState {
@@ -101,6 +101,7 @@ export function applySubagentEvent(
       description: label !== undefined && label !== '' ? label : ev.description,
       status: 'running',
       toolCount: 0,
+      startedAt: Date.now(),
     });
   } else {
     const idx = members.findIndex((m) => m.id === sid);
@@ -110,8 +111,11 @@ export function applySubagentEvent(
       members[idx] = { ...m, toolCount: m.toolCount + 1, activity: ev.name };
     } else if (ev.kind === 'error') {
       members[idx] = { ...m, activity: t('app.agent.activityError', { message: ev.message }) };
+    } else if (ev.kind === 'usage') {
+      // runner 已逐轮累计，这里只赋值（不加法）
+      members[idx] = { ...m, tokens: ev.tokens };
     } else {
-      members[idx] = { ...m, status: ev.isError ? 'error' : 'done' };
+      members[idx] = { ...m, status: ev.isError ? 'error' : 'done', endedAt: Date.now() };
     }
   }
   const steps = state.steps.map((s, i) => (i === wf.stepIndex ? { ...s, members } : s));
@@ -179,7 +183,8 @@ export function WorkflowPanel({ state }: { state: WorkflowPanelState }): React.R
                       <Text>
                         {'  │   '}
                         {branch} <Text color="white">{m.type}</Text>
-                        <Text color="gray"> · {m.description} · {m.toolCount} tools · </Text>
+                        {/* 无 tick：运行中时长显示最近一次事件触发渲染时的值，终态为定格值 */}
+                        <Text color="gray"> · {m.description} · {formatSubagentStats(m, Date.now())} · </Text>
                         <Text color={mColor}>{mMark} {mStatus}</Text>
                       </Text>
                       {m.status === 'running' && m.activity !== undefined && m.activity !== '' ? (
