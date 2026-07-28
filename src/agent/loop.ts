@@ -7,6 +7,7 @@ import {
   estimateTokens,
   fullCompact,
   microCompact,
+  OVERFLOW_SHRINK_RATIOS,
   shouldCompact,
   usageTotalTokens,
   type CompactionThresholds,
@@ -23,14 +24,6 @@ export type { AgentEvent } from './events.js';
 const KEEP_RECENT = 6;
 /** 单次 runAgent 内因溢出触发强制压缩重试的上限，防死循环。 */
 const MAX_OVERFLOW_RETRIES = 3;
-/**
- * 溢出重试的递进收缩比。
- * 第 N 次重试按第 N 个比例同时收缩「保留的最近消息条数」和「用户原话保真预算」。
- * 不这么做的话每次重试都跑同一套参数——第一次压不下去，后两次必然也压不下去，
- * 三次重试等于白烧三次摘要调用。
- */
-const OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
-
 export interface RunAgentOptions {
   provider: ChatProvider;
   system: string;

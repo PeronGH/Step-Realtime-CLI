@@ -1,6 +1,6 @@
 {
   "name": "step-code",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Step Code — a terminal coding agent CLI powered by StepFun models (Anthropic Messages protocol), Ink UI.",
   "type": "module",
   "bin": {

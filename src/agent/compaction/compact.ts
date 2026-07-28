@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import type { ChatProvider } from '../../provider/types.js';
 import { isStepref, STEPREF_PREFIX } from '../../session/attachments.js';
 import { stored, type MessageOrigin, type StoredMessage } from '../message.js';
@@ -32,11 +32,29 @@ const COMPACTION_SUMMARY_MIN_RATIO = 0.02;
 const COMPACTION_MAX_RETRIES = 3;
 
 /**
+ * overflow 比例收缩比。
+ * 摘要请求因输入太长触发 413 / context overflow 时，按此比例保留最近消息、
+ * 丢弃更老消息，而不是直接 drop 一条——比例收缩对大输入更可控。
+ * loop.ts 的溢出兜底路径也复用此数组，保证两处收缩节奏一致。
+ */
+export const OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
+
+/**
  * 摘要复述检测正则：匹配 serializeContent() 对 tool_use/tool_result/image/audio/video
  * 的内部标记。正常摘要不会产出这些标记——它们只在 prompt 的历史渲染里出现，
  * 模型若把它们写回摘要，说明在复述被压缩段而不是写交接笔记，判失败并重试。
  */
 const RECITATION_MARKERS = /\[调用工具 |\[工具结果\]|\[image |\[audio |\[video /;
+
+/**
+ * 媒体块降级标记：摘要请求因图片/音频/视频太大触发 413 / context overflow 时，
+ * 把它们替换成轻量文本 marker 再试一次，而不是直接丢弃历史。
+ */
+const MEDIA_PART_MARKERS: Record<string, string> = {
+  image: '[image]',
+  audio: '[audio]',
+  video: '[video]',
+};
 
 /**
  * 保真保留用户原始消息的 token 预算（默认 20K，对齐 256K 窗口约 7.6%）。
@@ -255,6 +273,63 @@ export function validateSummary(summary: string, olderTokens: number): void {
 }
 
 /**
+ * 把消息中的媒体块（image/audio/video）降级成轻量文本 marker。
+ * 用于摘要请求因媒体太大触发 413 / context overflow 时的自救：先剥离媒体再重试，
+ * 而不是直接丢掉整段历史。
+ *
+ * 无媒体块时返回原数组（changed=false），调用方可据此判断是否真正发生了剥离。
+ */
+function replaceMediaPartsWithMarkers(messages: readonly StoredMessage[]): {
+  messages: StoredMessage[];
+  changed: boolean;
+} {
+  let changed = false;
+  const out = messages.map((sm) => {
+    const content = sm.message.content;
+    if (typeof content === 'string') return sm;
+    let msgChanged = false;
+    const newContent = content.map((block) => {
+      const marker = MEDIA_PART_MARKERS[block.type];
+      if (marker === undefined) return block;
+      changed = true;
+      msgChanged = true;
+      return { type: 'text', text: marker } as Anthropic.TextBlockParam;
+    });
+    if (!msgChanged) return sm;
+    return { ...sm, message: { ...sm.message, content: newContent } };
+  });
+  return { messages: out, changed };
+}
+
+/**
+ * 按 token 预算从消息尾部往前取，然后 drop 开头因此变成孤儿的 tool_result。
+ * 用于 overflow 比例收缩：保留最近消息，丢弃更老的消息。
+ */
+function takeRecentMessagesWithinTokenBudget(messages: StoredMessage[], tokenBudget: number): StoredMessage[] {
+  let start = messages.length;
+  let tokens = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const messageTokens = estimateTokens([messages[i]!]);
+    if (tokens + messageTokens > tokenBudget) break;
+    tokens += messageTokens;
+    start = i;
+  }
+  // 至少保留最近一条；若 start=0 说明预算连最近一条都装不下，也保留它交给后续重试处理
+  if (start === 0) start = 1;
+  return dropOldestMessageAndLeadingToolResults(messages.slice(start));
+}
+
+/**
+ * overflow 比例收缩：按 ratio 保留最近消息，降低摘要请求的输入长度。
+ * 对齐 某竞品CLI 的 `shrinkCompactionHistoryAfterOverflow`（ratios [0.7, 0.5, 0.35]）。
+ */
+function shrinkCompactionHistoryAfterOverflow(messages: StoredMessage[], ratio: number): StoredMessage[] {
+  if (messages.length <= 1) return messages.slice();
+  const budget = Math.floor(estimateTokens(messages) * ratio);
+  return takeRecentMessagesWithinTokenBudget(messages, budget);
+}
+
+/**
  * 摘要重试前收缩输入：丢弃最老一条消息，以及紧随其后因此变成孤儿的 tool_result。
  * 对齐 某竞品CLI 的 `dropOldestMessageAndLeadingToolResults`：给摘要模型更少的输入，
  * 降低再次截断/空返的概率。
@@ -264,6 +339,24 @@ function dropOldestMessageAndLeadingToolResults(messages: readonly StoredMessage
   let start = 1;
   while (start < messages.length && isToolResultMsg(messages[start]!)) start++;
   return messages.slice(start);
+}
+
+/**
+ * 判断错误是否为上下文溢出或请求过大（413 / 400 prompt too long）。
+ * 摘要请求可能因 older 段含大量文本/媒体而直接命中 provider 的窗口限制，需要特殊处理。
+ */
+function isContextOverflowOrTooLarge(err: unknown): boolean {
+  if (!(err instanceof Anthropic.APIError)) return false;
+  if (err.status === 413) return true;
+  if (err.status !== 400) return false;
+  const msg = String(err.message ?? '').toLowerCase();
+  return (
+    msg.includes('prompt is too long') ||
+    msg.includes('too many tokens') ||
+    msg.includes('context_length') ||
+    msg.includes('context window') ||
+    msg.includes('maximum context')
+  );
 }
 
 /**
@@ -558,12 +651,18 @@ export async function fullCompact(
   );
 
   // 摘要生成 + 质量校验 + 重试（对标 某竞品CLI compactionRound 的 empty/truncated 重试循环）。
-  // 每次失败后收缩输入（dropOldestMessageAndLeadingToolResults）再试；尝试耗尽则**原样返回**
-  // （同引用 = 未压缩），把「宁可不压」交给调用方处理，而不是让垃圾摘要吞掉历史。
-  // 不抛错是刻意的：loop.ts 的调用点没有 try/catch，抛错会直接掀翻整个回合。
+  // 区分三类失败：
+  //   1. context overflow / 413：先尝试剥离媒体块，再按比例收缩历史（[0.7, 0.5, 0.35]），
+  //      而不是直接丢弃消息——因为这类错误往往是大输入导致，收缩比例更可控；
+  //   2. 空返 / truncated：drop 最老消息 + 孤儿 tool_result；
+  //   3. 其他网络 / API 失败：同样 drop 最老消息重试。
+  // 尝试耗尽则**原样返回**（同引用 = 未压缩），把「宁可不压」交给调用方处理，
+  // 而不是让垃圾摘要吞掉历史。不抛错是刻意的：loop.ts 调用点无 try/catch，抛错会掀翻整个回合。
   const olderTokens = estimateTokens(older);
   let summary: string | undefined;
   let olderForSummary: StoredMessage[] = older;
+  let mediaStripAttempted = false;
+  let overflowShrinkCount = 0;
   for (let attempt = 1; attempt <= COMPACTION_MAX_RETRIES; attempt++) {
     const summaryPrompt =
       `${SUMMARY_INSTRUCTION}\n\n--- 以下是即将被清空的对话历史 ---\n\n` +
@@ -582,8 +681,31 @@ export async function fullCompact(
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('');
-    } catch {
-      // 网络 / API 失败：收缩输入再试（输入已无可收缩则放弃压缩）
+    } catch (err) {
+      const isOverflow = isContextOverflowOrTooLarge(err);
+      // overflow / 413：先剥离媒体块再试一次（媒体常是 413 主因，且 marker 仍保留定位信息）
+      if (isOverflow && !mediaStripAttempted) {
+        const stripped = replaceMediaPartsWithMarkers(olderForSummary);
+        if (stripped.changed) {
+          olderForSummary = stripped.messages;
+          mediaStripAttempted = true;
+          continue;
+        }
+      }
+      // overflow / 413：按比例收缩历史（比例制比直接 drop 更可控）
+      if (isOverflow && overflowShrinkCount < OVERFLOW_SHRINK_RATIOS.length) {
+        overflowShrinkCount++;
+        const ratio = OVERFLOW_SHRINK_RATIOS[overflowShrinkCount - 1]!;
+        const before = olderForSummary.length;
+        olderForSummary = shrinkCompactionHistoryAfterOverflow(olderForSummary, ratio);
+        if (olderForSummary.length >= before) {
+          // 收缩没丢消息（预算太紧）， fallback 到 drop oldest
+          if (olderForSummary.length <= 1) return messages;
+          olderForSummary = dropOldestMessageAndLeadingToolResults(olderForSummary);
+        }
+        continue;
+      }
+      // 其他失败或已无收缩空间：drop 最老一条 + 孤儿 tool_result
       if (olderForSummary.length <= 1) return messages;
       olderForSummary = dropOldestMessageAndLeadingToolResults(olderForSummary);
       continue;

@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import { fullCompact, validateSummary, estimateTextTokens } from '../../src/agent/compaction/compact.js';
 import { stored, type StoredMessage } from '../../src/agent/message.js';
@@ -175,5 +176,87 @@ describe('fullCompact 摘要质量闸门', () => {
     // 摘要输入被收缩，但保真选择基于完整 older 段，故最早那条路径原话不会丢
     expect(verbatim.some((t) => t.includes('step-code-suite'))).toBe(true);
     expect(verbatim.some((t) => t.includes('keys.json'))).toBe(true);
+  });
+});
+
+describe('fullCompact overflow / 媒体块自救', () => {
+  /** 构造一条带 inline 图片的用户消息。 */
+  function imageMsg(text: string): StoredMessage {
+    return stored(
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(10_000) },
+          } as Anthropic.ImageBlockParam,
+        ],
+      },
+      'user',
+    );
+  }
+
+  it('413 时先剥离媒体块再重试，成功则正常压缩', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { throw: new Anthropic.APIError(413, undefined, 'request too large', undefined) },
+      { textChunks: [], finalContent: [textBlock(goodSummary('剥离媒体后成功'))] },
+    ]);
+    const msgs: StoredMessage[] = [
+      imageMsg('项目路径在 C:/step-code'),
+      bulkAssistant('A1'),
+      stored({ role: 'user', content: '继续' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 1);
+    expect(streamCalls()).toBe(2);
+    expect(out).not.toBe(msgs);
+    expect(summaryOf(out).message.content).toContain('剥离媒体后成功');
+  });
+
+  it('context overflow (400 prompt too long) 走比例收缩，成功则正常压缩', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { throw: new Anthropic.APIError(400, undefined, 'prompt is too long', undefined) },
+      { textChunks: [], finalContent: [textBlock(goodSummary('收缩后成功'))] },
+    ]);
+    const msgs = historyWithFacts();
+    const out = await fullCompact(provider, msgs, 2);
+    expect(streamCalls()).toBe(2);
+    expect(out).not.toBe(msgs);
+    expect(summaryOf(out).message.content).toContain('收缩后成功');
+  });
+
+  it('媒体块剥离后仍 overflow，继续比例收缩直到成功', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { throw: new Anthropic.APIError(413, undefined, 'request too large', undefined) },
+      { throw: new Anthropic.APIError(400, undefined, 'prompt is too long', undefined) },
+      { textChunks: [], finalContent: [textBlock(goodSummary('二次收缩后成功'))] },
+    ]);
+    const msgs: StoredMessage[] = [
+      imageMsg('图1'),
+      bulkAssistant('A1'),
+      imageMsg('图2'),
+      bulkAssistant('A2'),
+      stored({ role: 'user', content: '最近' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 1);
+    expect(streamCalls()).toBe(3);
+    expect(out).not.toBe(msgs);
+    expect(summaryOf(out).message.content).toContain('二次收缩后成功');
+  });
+
+  it('overflow 耗尽重试次数后原样返回，不抛错', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { throw: new Anthropic.APIError(413, undefined, 'request too large', undefined) },
+      { throw: new Anthropic.APIError(400, undefined, 'prompt is too long', undefined) },
+      { throw: new Anthropic.APIError(413, undefined, 'request too large', undefined) },
+    ]);
+    const msgs: StoredMessage[] = [
+      imageMsg('图1'),
+      bulkAssistant('A1'),
+      stored({ role: 'user', content: '最近' }, 'user'),
+    ];
+    const out = await fullCompact(provider, msgs, 1);
+    expect(streamCalls()).toBe(3);
+    expect(out).toBe(msgs);
   });
 });
