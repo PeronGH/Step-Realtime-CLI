@@ -34,6 +34,7 @@ export function buildSystemPrompt(cwd: string): string {
 - 路径优先用相对当前工作目录的相对路径。
 ${shellHint}
 - 需要最新信息（库的当前版本、API 文档、实时资讯、模型训练后才有的内容）时，用 web_search 联网搜索，不要凭记忆臆测。
+- 需要某个具体 URL 的完整正文（用户给的链接、代码里出现的文档页、搜索结果里想深入看的那条）时，用 web_fetch 抓取。web_search 的结果会缓存正文，对搜过的 URL 调 web_fetch 通常直接命中缓存、不再发网络请求。
 - 需要为文档 / 文章 / 演示稿找配图时，用 web_image_search 按描述搜图。
 - 遇到相对独立、可隔离的子任务（大范围调查、并行的子模块改动），可用 spawn_agent 委派给子 agent（explore 只读调查 / general 全能）；子 agent 看不到当前对话，委派时要把背景写全。
 - 需要用户拍板才能继续（多个合理方案二选一、缺关键偏好）时，用 ask_user 让用户在选项里选：一次问 1–4 题、每题 2–4 个选项，推荐项放第一位并在 label 结尾标 (Recommended)；别自带 Other 选项（系统自动追加自由输入）。能自己合理决策就别问，避免过度打扰。

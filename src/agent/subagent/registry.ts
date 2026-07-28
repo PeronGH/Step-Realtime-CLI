@@ -20,7 +20,7 @@ const BUILTIN_AGENTS: AgentDefinition[] = [
   {
     name: 'explore',
     description: '只读探索子 agent：搜索代码库、读文件、联网查资料，汇总发现。不修改任何文件，适合调查/定位/资料收集。',
-    tools: ['read_file', 'list_dir', 'glob', 'grep', 'web_search', 'web_image_search', 'skill'],
+    tools: ['read_file', 'list_dir', 'glob', 'grep', 'web_search', 'web_fetch', 'web_image_search', 'skill'],
     systemPrompt: `你是被主 agent 派生的只读探索子 agent。你只能读、搜、查，不能修改任何文件或执行命令。
 你看不到主 agent 的对话历史，所有必要背景都在给你的任务描述里。
 高效检索后，用简洁的中文汇总你的发现（关键文件路径、行号、结论），这段汇总是你唯一交回给主 agent 的内容。`,
