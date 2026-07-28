@@ -10,6 +10,7 @@ import { historyToDisplayItems } from './historyReplay.js';
 import { decide, planModeDenyReason, type PermissionMode } from '../agent/permission/mode.js';
 import { BackgroundManager, type BackgroundTask } from '../agent/background/manager.js';
 import { decideNotifyRoute, formatSettleNotification } from '../agent/background/notify.js';
+import { emitTerminalNotification } from '../agent/background/terminal-notify.js';
 import { GoalMode, type GoalState } from '../agent/goal/mode.js';
 import { CronScheduler } from '../agent/cron/scheduler.js';
 import { CronJobStore } from '../agent/cron/store.js';
@@ -1590,6 +1591,11 @@ export function App({
         command: task.command,
       }),
     });
+    // 终端通知（铃响/桌面通知）：独立于 notifyOnComplete，用户切走终端也能感知。
+    if (config.background?.notifyTerminal !== false) {
+      const statusLabel = t(`background.status.${task.status}`);
+      emitTerminalNotification(`后台任务 ${task.id} ${statusLabel}：${task.command}`);
+    }
     if (config.background?.notifyOnComplete === false) {
       background.current.drainSettled();
       return;

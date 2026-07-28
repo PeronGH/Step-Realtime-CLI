@@ -44,6 +44,8 @@ export interface BackgroundConfig {
   bashTaskTimeoutS?: number;
   /** 后台任务终态时主动注入完成通知（默认 true；false 回到模型经 task_list 查询）。 */
   notifyOnComplete?: boolean;
+  /** 后台任务终态时发终端铃响/桌面通知（默认 true；false 静默）。 */
+  notifyTerminal?: boolean;
 }
 
 /**
@@ -409,6 +411,8 @@ export function resolveBackgroundConfig(raw: unknown): BackgroundConfig {
   }
   const notify = t['notify_on_complete'];
   if (typeof notify === 'boolean') cfg.notifyOnComplete = notify;
+  const notifyTerm = t['notify_terminal'];
+  if (typeof notifyTerm === 'boolean') cfg.notifyTerminal = notifyTerm;
   return cfg;
 }
 
