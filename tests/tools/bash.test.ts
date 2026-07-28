@@ -1,6 +1,42 @@
 import { describe, expect, it } from 'vitest';
 import { BackgroundManager } from '../../src/agent/background/manager.js';
-import { bashTool } from '../../src/tools/bash.js';
+import { bashTool, prepareCommand } from '../../src/tools/bash.js';
+import type { ResolvedShell, ShellFamily } from '../../src/tools/shellResolve.js';
+
+/** 构造指定 family 的 ResolvedShell 桩（args/cmd 不影响 prepareCommand 逻辑）。 */
+function shellOf(family: ShellFamily): ResolvedShell {
+  return { cmd: 'x', args: (c) => [c], family };
+}
+
+describe('prepareCommand 按 family 预处理', () => {
+  it('posix：NUL 重定向改写，cwd 原样', () => {
+    const r = prepareCommand('echo x >NUL 2>&1', shellOf('posix'), 'C:\\proj');
+    expect(r.command).toBe('echo x >/dev/null 2>&1');
+    expect(r.cwd).toBe('C:\\proj');
+  });
+
+  it('busybox：同样改写 NUL', () => {
+    const r = prepareCommand('cmd 2>NUL', shellOf('busybox'), 'C:\\p');
+    expect(r.command).toBe('cmd 2>/dev/null');
+  });
+
+  it('wsl：命令前拼 cd /mnt 挂载路径 + 改写 NUL，spawn cwd 保持原生 Windows 路径', () => {
+    const r = prepareCommand('ls >NUL', shellOf('wsl'), 'C:\\proj\\sub');
+    expect(r.command).toBe("cd '/mnt/c/proj/sub' && ls >/dev/null");
+    expect(r.cwd).toBe('C:\\proj\\sub'); // wsl.exe 是 Windows 程序，spawn 用原生路径
+  });
+
+  it('wsl：winPathToWsl 无法识别的 cwd 时不加 cd 前缀', () => {
+    const r = prepareCommand('ls', shellOf('wsl'), 'relative/path');
+    expect(r.command).toBe('ls'); // 无 cd 前缀
+  });
+
+  it('powershell：命令与 cwd 原样透传，不改 NUL', () => {
+    const r = prepareCommand('Get-ChildItem 2>$null', shellOf('powershell'), 'C:\\p');
+    expect(r.command).toBe('Get-ChildItem 2>$null');
+    expect(r.cwd).toBe('C:\\p');
+  });
+});
 
 describe('bash 前台执行', () => {
   it('正常命令返回输出（非 error）', async () => {

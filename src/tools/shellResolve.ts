@@ -5,9 +5,11 @@ import { join } from 'node:path';
 /**
  * 跨平台 shell 解析：为 bash 工具与 system prompt 提供统一的解释器选择。
  *
- * Windows 探测链（对齐健壮实现，末端保留 cmd.exe 兜底）：
+ * Windows 探测链（对齐主流 coding CLI，不回退 cmd.exe）：
  *   环境变量覆盖 → PATH 中的 bash（排除 WSL 启动器）→ 从 git 推断 Git Bash
- *   → 注册表推断 Git Bash → WSL → busybox-w32 → PowerShell → cmd.exe。
+ *   → 注册表推断 Git Bash → WSL → busybox-w32 → PowerShell。
+ *   不回退 cmd.exe（cmd 不认 Unix 语法，兜底到它是「能跑但全错」）；
+ *   皆无时 family='none'，由 bash 工具报错引导装 Git Bash。
  *
  * family 语义：
  *   - posix：Git Bash / MSYS bash / 原生 bash，标准 POSIX 语法
@@ -36,19 +38,21 @@ function isWslLauncherPath(path: string): boolean {
 /** 在 PATH 中查找可执行文件，返回绝对路径或 undefined。 */
 function which(name: string): string | undefined {
   try {
-    // where 在 Windows、command -v 在 POSIX；统一用 Node 的 execFileSync + 平台命令
     if (process.platform === 'win32') {
+      // where 可能返回多行；取第一个真实存在的路径（首行可能是已卸载残留）。
       const out = execFileSync('where', [name], {
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 5000,
       }).toString();
-      const first = out.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
-      return first && existsSync(first) ? first : undefined;
+      return out
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0 && existsSync(l));
     }
-    const out = execFileSync('command', ['-v', name], {
+    // POSIX：command 是 shell 内建，必须在 shell 里跑，不能当可执行文件 execFile。
+    const out = execFileSync('/bin/sh', ['-c', `command -v ${name}`], {
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5000,
-      shell: '/bin/sh',
     }).toString();
     const first = out.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
     return first || undefined;
@@ -71,7 +75,7 @@ function gitBashFromRegistry(): string | undefined {
         timeout: 5000,
       }).toString();
       // 形如：    InstallPath    REG_SZ    C:\Program Files\Git
-      const m = out.match(/InstallPath\s+REG_\w+\s+(.+)/);
+      const m = out.match(/^\s*InstallPath\s+REG_\w+\s+(.+)$/m);
       const installPath = m?.[1]?.trim();
       if (installPath) {
         for (const sub of ['bin', join('usr', 'bin')]) {
@@ -99,6 +103,7 @@ function gitBashFromGitExe(): string | undefined {
   }
 
   // 通过 git --exec-path 推断：形如 C:\Program Files\Git\mingw64\libexec\git-core
+  // 也可能是 MSYS 风格 /c/Program Files/Git/mingw64/...（split+join 会丢盘符冒号与前导分隔符）。
   try {
     const execPath = execFileSync(gitExe, ['--exec-path'], {
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -109,7 +114,15 @@ function gitBashFromGitExe(): string | undefined {
     const parts = execPath.split(/[/\\]/);
     const idx = parts.findIndex((p) => p.toLowerCase() === 'mingw32' || p.toLowerCase() === 'mingw64');
     if (idx > 0) {
-      const root = parts.slice(0, idx).join('\\');
+      const head = parts.slice(0, idx);
+      // MSYS 风格 /c/... → 前导空串 + 单字母盘符，重建为 C:\ 形式；否则原样 join。
+      // filter(Boolean) 去掉连续分隔符产生的空段，避免拼出 C:\\dir 双分隔符。
+      let root: string;
+      if (head[0] === '' && head[1] !== undefined && /^[A-Za-z]$/.test(head[1])) {
+        root = `${head[1].toUpperCase()}:\\${head.slice(2).filter(Boolean).join('\\')}`;
+      } else {
+        root = head.filter(Boolean).join('\\');
+      }
       for (const sub of ['bin', join('usr', 'bin')]) {
         const cand = join(root, sub, 'bash.exe');
         if (existsSync(cand)) return cand;
@@ -161,14 +174,19 @@ function findWslBash(): string | undefined {
   const wslExe = which('wsl');
   if (!wslExe) return undefined;
   try {
-    // 快速验证 WSL 可用（有已安装发行版），不启动完整发行版
-    const out = execFileSync(wslExe, ['--list', '--quiet'], {
+    // wsl --list --quiet 输出为 UTF-16LE。用 buffer 显式按 utf16le 解码，
+    // 再剥除 BOM / 控制字符，判断是否有真实发行版名（含字母或数字的非空行）。
+    // 无发行版时输出为空或仅本地化提示（--quiet 下通常为空），非 0 退出会抛进 catch。
+    const buf = execFileSync(wslExe, ['--list', '--quiet'], {
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5000,
-    }).toString();
-    // wsl --list 输出常为 UTF-16LE，含大量 \x00；有非空可见内容即视为有发行版
-    const cleaned = out.replace(/\u0000/g, '').trim();
-    return cleaned.length > 0 ? wslExe : undefined;
+    });
+    const text = buf.toString('utf16le').replace(/^\uFEFF/, '');
+    const hasDistro = text
+      .split(/\r?\n/)
+      .map((l) => l.replace(/[\u0000-\u001f\uFFFD]/g, '').trim())
+      .some((l) => /[A-Za-z0-9]/.test(l));
+    return hasDistro ? wslExe : undefined;
   } catch {
     return undefined;
   }
@@ -230,18 +248,36 @@ function detectShell(): ResolvedShell {
 }
 
 let cached: ResolvedShell | undefined;
+/** 上次探测到 none 的时间戳（节流用，避免真无 shell 时每次调用都全量重探）。 */
+let noneProbedAt = 0;
+/** none 结果的重探节流窗口（ms）：窗口内直接复用 none，窗口后允许重探（中途装了 Git Bash 能生效）。 */
+const NONE_REPROBE_MS = 30_000;
 
-/** 解析 shell（模块级缓存，进程内只探测一次）。 */
+/**
+ * 解析 shell（模块级缓存，进程内命中真实 shell 后只探测一次）。
+ * 例外：family='none'（未找到任何 shell）不长期缓存——长驻会话中途装了 Git Bash 后能重新探测生效，
+ * 无需重启进程。但探测链含多个带 5s 超时的子进程，为避免真无 shell 时每次 bash 调用都全量重探造成
+ * 长时间阻塞，对 none 结果做 30s 节流：窗口内直接返回 none，窗口后才允许再探。
+ */
 export function resolveShell(): ResolvedShell {
-  if (cached === undefined) {
-    cached = detectShell();
+  if (cached !== undefined) return cached;
+  const now = Date.now();
+  if (now - noneProbedAt < NONE_REPROBE_MS) {
+    return { cmd: '', args: (command) => [command], family: 'none' };
   }
+  const resolved = detectShell();
+  if (resolved.family === 'none') {
+    noneProbedAt = now; // 记录探测时刻，窗口内不再重探
+    return resolved;
+  }
+  cached = resolved;
   return cached;
 }
 
-/** 测试用：清空探测缓存。 */
+/** 测试用：清空探测缓存（含 none 节流时间戳）。 */
 export function resetShellCache(): void {
   cached = undefined;
+  noneProbedAt = 0;
 }
 
 /**
@@ -260,14 +296,19 @@ export function winPathToWsl(path: string): string | undefined {
  * 把 Windows 风格的 NUL 重定向改写成 POSIX 的 /dev/null。
  * `echo x >NUL 2>&1` -> `echo x > /dev/null 2>&1`。
  * Git Bash / WSL / busybox 都认 /dev/null，不认 Windows 的 NUL。
+ * 覆盖裸 `NUL`、设备名 `NUL:`、以及带引号的 `"NUL"`；不误伤 `NULL`/`nullable` 等普通词。
  */
 export function rewriteNulRedirect(command: string): string {
-  return command.replace(/(\d?&?>+\s*)[Nn][Uu][Ll](?=\s|$|[|&;)\n])/g, '$1/dev/null');
+  return command
+    // 引号包裹：>"NUL" / 2>"NUL"（引号内允许尾随冒号）
+    .replace(/(\d?&?>+\s*)"[Nn][Uu][Ll]:?"/g, '$1/dev/null')
+    // 裸形式：>NUL / 2>NUL / >NUL:（设备名冒号可选），后接空白/结尾/管道等边界
+    .replace(/(\d?&?>+\s*)[Nn][Uu][Ll]:?(?=\s|$|[|&;)\n])/g, '$1/dev/null');
 }
 
 /**
  * 生成 system prompt 里 bash 工具的 shell 语法提示行，按实际生效的 family 定制。
- * 这样即便回退到 PowerShell/cmd，也不会误导模型写 Unix 命令。
+ * 这样即便回退到 PowerShell，也不会误导模型写 Unix 命令。
  */
 export function shellPromptHint(family: ShellFamily): string {
   switch (family) {
@@ -283,6 +324,11 @@ export function shellPromptHint(family: ShellFamily): string {
       return '- 未检测到 POSIX shell，bash 工具回退到 PowerShell：用 cmdlet/PS 语法（`Get-ChildItem`、`2>$null`、反斜杠路径），不要写 Unix 语法（`ls`、`2>/dev/null` 会失败）。';
     case 'none':
       return '- 未检测到任何可用 shell（Git Bash / WSL / busybox / PowerShell 都没有），bash 工具将无法执行命令。请先安装 Git for Windows（提供 Git Bash）。';
+    default: {
+      // 穷尽检查：新增 family 成员而漏改此处会在编译期报错。
+      const _exhaustive: never = family;
+      return _exhaustive;
+    }
   }
 }
 

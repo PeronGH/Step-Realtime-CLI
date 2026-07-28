@@ -29,10 +29,11 @@ const MAX_COLLECT = 10 * 1024 * 1024;
  *   通过命令前加 `cd /mnt/...` 显式切换。同时把 NUL 重定向改写成 /dev/null。
  * - posix/busybox：cwd 直接用原生路径（Git Bash 的 bash.exe 认 Windows 路径，转 /c/ 反而报错）；
  *   NUL 重定向改写成 /dev/null。
- * - powershell/cmd：命令与 cwd 原样透传。
+ * - powershell：命令与 cwd 原样透传（none 在 execute 入口已拦截，走不到这里）。
  * 返回处理后的 command 与传给 spawn 的 cwd。
+ * 导出供单元测试直接验证各 family 的处理（生产路径只在本模块内调用）。
  */
-function prepareCommand(
+export function prepareCommand(
   command: string,
   shell: ResolvedShell,
   cwd: string,

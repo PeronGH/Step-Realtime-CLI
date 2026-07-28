@@ -107,6 +107,9 @@ export class BackgroundManager {
 
   /** 起一个后台进程。超并发上限抛错。返回 task id。 */
   start(command: string, shellCmd: string, shellArgs: string[], cwd: string): string {
+    if (shellCmd === '') {
+      throw new Error('无可用 shell 解释器，无法启动后台命令（Windows 上请安装 Git Bash 或设置 STEP_SHELL_PATH）。');
+    }
     if (this.activeCount() >= this.maxRunning) {
       throw new Error(`后台任务已达上限（${this.maxRunning}），请先等待或停止部分任务。`);
     }

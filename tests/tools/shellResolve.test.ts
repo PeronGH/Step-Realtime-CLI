@@ -29,6 +29,19 @@ describe('winPathToWsl', () => {
     expect(winPathToWsl('/home/user')).toBeUndefined();
     expect(winPathToWsl('relative/path')).toBeUndefined();
   });
+
+  it('UNC 路径不识别（返回 undefined，非本函数职责）', () => {
+    expect(winPathToWsl('\\\\server\\share')).toBeUndefined();
+  });
+
+  it('无盘符分隔符的畸形路径不匹配', () => {
+    expect(winPathToWsl('C:foo')).toBeUndefined();
+  });
+
+  it('含空格与混合分隔符的路径正常转换', () => {
+    expect(winPathToWsl('C:\\Program Files\\Git')).toBe('/mnt/c/Program Files/Git');
+    expect(winPathToWsl('C:/a\\b')).toBe('/mnt/c/a/b');
+  });
 });
 
 describe('rewriteNulRedirect', () => {
@@ -52,6 +65,33 @@ describe('rewriteNulRedirect', () => {
 
   it('保留重定向前缀空白与操作符', () => {
     expect(rewriteNulRedirect('cmd > NUL')).toBe('cmd > /dev/null');
+  });
+
+  it('覆盖 >> / 1> / &> 及一行多处', () => {
+    expect(rewriteNulRedirect('cmd >>NUL')).toBe('cmd >>/dev/null');
+    expect(rewriteNulRedirect('cmd 1>NUL')).toBe('cmd 1>/dev/null');
+    expect(rewriteNulRedirect('a >NUL; b 2>NUL')).toBe('a >/dev/null; b 2>/dev/null');
+  });
+
+  it('管道 / 分号 / 右括号后的 NUL 也改写', () => {
+    expect(rewriteNulRedirect('cmd >NUL | tail')).toBe('cmd >/dev/null | tail');
+    expect(rewriteNulRedirect('(cmd >NUL)')).toBe('(cmd >/dev/null)');
+  });
+
+  it('设备名 NUL: 形式改写', () => {
+    expect(rewriteNulRedirect('cmd >NUL:')).toBe('cmd >/dev/null');
+    expect(rewriteNulRedirect('cmd 2>NUL: rest')).toBe('cmd 2>/dev/null rest');
+  });
+
+  it('引号包裹 "NUL" / "NUL:" 改写', () => {
+    expect(rewriteNulRedirect('cmd >"NUL"')).toBe('cmd >/dev/null');
+    expect(rewriteNulRedirect('cmd 2>"NUL:"')).toBe('cmd 2>/dev/null');
+  });
+
+  it('不误伤 NUL:foo（非标准空设备写法）与普通词', () => {
+    expect(rewriteNulRedirect('cmd >NUL:foo')).toBe('cmd >NUL:foo');
+    expect(rewriteNulRedirect('echo NULL')).toBe('echo NULL');
+    expect(rewriteNulRedirect('grep nullable f')).toBe('grep nullable f');
   });
 });
 
