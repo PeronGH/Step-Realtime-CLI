@@ -6,6 +6,39 @@ import { stored, type MessageOrigin, type StoredMessage } from '../message.js';
 const CLEARED_PLACEHOLDER = '[旧工具结果已清理以节省上下文]';
 
 /**
+ * 摘要信息量下限的封顶值（token）。
+ * 实测事故：891K token 的历史被一条 56 字符的「摘要」替换掉，而旧代码只拦空串，
+ * 于是灾难性遗忘静默发生。下限用来兜住这类失控产出。
+ *
+ * 口径统一用 token（而非字符）：同样体量的历史，中文的字符数约等于 token 数，
+ * 英文约为 4 倍，若拿字符数比 token 基数，英文会拿到约 4 倍宽松的下限。
+ */
+const COMPACTION_SUMMARY_MIN_TOKENS_CAP = 200;
+
+/**
+ * 信息量下限相对被压缩量的比例（默认 2%）。
+ * 不用固定值：被压缩段只有几十 token 时，一句话摘要本就够用，固定下限会把正常
+ * 小压缩全判失败——更要紧的是，下限一旦超过原文体量，这道闸门就永远无法通过。
+ * 故实际下限取 `min(cap, olderTokens × 此比例)`，用 min 把下限压在原文体量之下：
+ * 压得越多，对摘要的信息量要求越高；压得少则几乎不设限。
+ */
+const COMPACTION_SUMMARY_MIN_RATIO = 0.02;
+
+/**
+ * 全量压缩摘要最大尝试次数。每次失败后收缩输入（丢弃最老消息 + 其后的孤儿 tool_result），
+ * 对齐 某竞品CLI compactionRound 的 empty/truncated 重试循环（某竞品 取 5 次；
+ * step-code 已有 user_verbatim 保真兜底，取 3 次够用且少烧摘要调用）。
+ */
+const COMPACTION_MAX_RETRIES = 3;
+
+/**
+ * 摘要复述检测正则：匹配 serializeContent() 对 tool_use/tool_result/image/audio/video
+ * 的内部标记。正常摘要不会产出这些标记——它们只在 prompt 的历史渲染里出现，
+ * 模型若把它们写回摘要，说明在复述被压缩段而不是写交接笔记，判失败并重试。
+ */
+const RECITATION_MARKERS = /\[调用工具 |\[工具结果\]|\[image |\[audio |\[video /;
+
+/**
  * 保真保留用户原始消息的 token 预算（默认 20K，对齐 256K 窗口约 7.6%）。
  * 压缩最大的信息损失是「用户当初到底要什么」被摘要转述掉——摘要是模型的二手转述，
  * 一旦措辞漂移，后续回合就会按错误理解继续干活（实测：压缩后误判项目路径）。
@@ -189,6 +222,48 @@ export function microCompact(
 function isToolResultMsg(m: StoredMessage): boolean {
   const msg = m.message;
   return msg.role === 'user' && Array.isArray(msg.content) && msg.content.some((b) => b.type === 'tool_result');
+}
+
+/** 摘要复述检测：命中 serializeContent 内部标记 → 模型在复述被压缩段而非写交接笔记。 */
+function isRecitation(summary: string): boolean {
+  return RECITATION_MARKERS.test(summary);
+}
+
+/**
+ * 摘要质量校验。不合格抛错，由 fullCompact 的重试循环捕获。
+ *
+ * 三类不合格：空白、信息量不足（相对被压缩量，见 COMPACTION_SUMMARY_MIN_RATIO）、
+ * 复述内部标记。这是对旧实现「只拦空串」的补足——一条 56 字符的复述片段照样能
+ * 替换掉几十万 token 的历史，且静默无告警。
+ *
+ * 摘要与 olderTokens 都按 estimateTextTokens 口径度量，中英文一致（见常量注释）。
+ */
+export function validateSummary(summary: string, olderTokens: number): void {
+  const trimmed = summary.trim();
+  if (trimmed === '') throw new Error('compaction summary is empty');
+  const minTokens = Math.min(
+    COMPACTION_SUMMARY_MIN_TOKENS_CAP,
+    Math.floor(olderTokens * COMPACTION_SUMMARY_MIN_RATIO),
+  );
+  const summaryTokens = estimateTextTokens(trimmed);
+  if (summaryTokens < minTokens) {
+    throw new Error(`compaction summary too short: ${summaryTokens} tokens < ${minTokens} required`);
+  }
+  if (isRecitation(trimmed)) {
+    throw new Error('compaction summary contains recitation markers');
+  }
+}
+
+/**
+ * 摘要重试前收缩输入：丢弃最老一条消息，以及紧随其后因此变成孤儿的 tool_result。
+ * 对齐 某竞品CLI 的 `dropOldestMessageAndLeadingToolResults`：给摘要模型更少的输入，
+ * 降低再次截断/空返的概率。
+ */
+function dropOldestMessageAndLeadingToolResults(messages: readonly StoredMessage[]): StoredMessage[] {
+  if (messages.length <= 1) return messages.slice();
+  let start = 1;
+  while (start < messages.length && isToolResultMsg(messages[start]!)) start++;
+  return messages.slice(start);
 }
 
 /**
@@ -482,27 +557,50 @@ export async function fullCompact(
     userBudget?.headTokens ?? COMPACT_USER_MESSAGE_HEAD_TOKENS,
   );
 
-  const summaryPrompt =
-    `${SUMMARY_INSTRUCTION}\n\n--- 以下是即将被清空的对话历史 ---\n\n` +
-    older.map((m) => `${m.message.role}: ${serializeContent(m.message.content)}`).join('\n');
+  // 摘要生成 + 质量校验 + 重试（对标 某竞品CLI compactionRound 的 empty/truncated 重试循环）。
+  // 每次失败后收缩输入（dropOldestMessageAndLeadingToolResults）再试；尝试耗尽则**原样返回**
+  // （同引用 = 未压缩），把「宁可不压」交给调用方处理，而不是让垃圾摘要吞掉历史。
+  // 不抛错是刻意的：loop.ts 的调用点没有 try/catch，抛错会直接掀翻整个回合。
+  const olderTokens = estimateTokens(older);
+  let summary: string | undefined;
+  let olderForSummary: StoredMessage[] = older;
+  for (let attempt = 1; attempt <= COMPACTION_MAX_RETRIES; attempt++) {
+    const summaryPrompt =
+      `${SUMMARY_INSTRUCTION}\n\n--- 以下是即将被清空的对话历史 ---\n\n` +
+      olderForSummary.map((m) => `${m.message.role}: ${serializeContent(m.message.content)}`).join('\n');
 
-  let summary = '';
-  try {
-    const stream = provider.stream({
-      system: SUMMARY_SYSTEM,
-      tools: [],
-      messages: [{ role: 'user', content: summaryPrompt }],
-      model,
-    });
-    const final: Anthropic.Message = await stream.finalMessage();
-    summary = final.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
-  } catch {
-    return messages; // 摘要失败则不压缩，保证安全
+    let candidate: string;
+    try {
+      const stream = provider.stream({
+        system: SUMMARY_SYSTEM,
+        tools: [],
+        messages: [{ role: 'user', content: summaryPrompt }],
+        model,
+      });
+      const final: Anthropic.Message = await stream.finalMessage();
+      candidate = final.content
+        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+        .map((b) => b.text)
+        .join('');
+    } catch {
+      // 网络 / API 失败：收缩输入再试（输入已无可收缩则放弃压缩）
+      if (olderForSummary.length <= 1) return messages;
+      olderForSummary = dropOldestMessageAndLeadingToolResults(olderForSummary);
+      continue;
+    }
+
+    // 质量闸门：不合格就收缩输入重试，绝不拿它替换历史
+    try {
+      validateSummary(candidate, olderTokens);
+      summary = candidate;
+      break;
+    } catch {
+      if (olderForSummary.length <= 1) return messages;
+      olderForSummary = dropOldestMessageAndLeadingToolResults(olderForSummary);
+    }
   }
-  if (summary.trim() === '') return messages;
+  // 尝试耗尽仍无合格摘要 → 放弃压缩，历史完整保留
+  if (summary === undefined) return messages;
 
   // TODO 本体存独立 store（不占 messages），压缩不丢；把当前清单拼进摘要尾部，让压缩后模型立刻看到进度
   const todoBlock = todos !== undefined ? renderTodoList(todos) : '';
@@ -535,7 +633,6 @@ export async function fullCompact(
   // 却把其中的用户原话整条搬出来），保真的成本会吃掉摘要省下的量，压缩退化成搬运。
   // 此时退回纯摘要形态。真实场景下 older 段动辄几万 token、用户原话占比很小，守卫不会触发。
   const verbatimCount = selection.head.length + selection.tail.length;
-  const olderTokens = estimateTokens(older);
   const verbatimTokens = estimateTokens([...selection.head, ...selection.tail]);
   const worthKeeping = verbatimCount > 0 && verbatimTokens <= olderTokens * USER_BLOCK_MAX_SHARE;
 

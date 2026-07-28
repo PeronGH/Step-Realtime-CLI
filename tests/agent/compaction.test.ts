@@ -474,6 +474,14 @@ describe('fullCompact 用户原话保真', () => {
     return stored({ role: 'assistant', content: [textBlock(`${tag} ${'详细分析内容'.repeat(40)}`)] }, 'assistant');
   }
 
+  /**
+   * 构造能过摘要质量闸门的摘要文本：闸门下限随被压缩量按比例上浮（封顶 200 字符），
+   * 本组用例的 older 段是 bulk 消息，故摘要必须够长。marker 保留在开头供断言。
+   */
+  function longSummary(marker: string): string {
+    return `${marker}：已确认路径与配置，关键结论与下一步都记在案。${'继续补充这一步的依据与上下文。'.repeat(14)}`;
+  }
+
   it('用户原话以独立 user_verbatim 消息保留，排在摘要之前', async () => {
     const { provider } = makeFakeProvider([
       { textChunks: [], finalContent: [textBlock('我已经确认了路径并改完了配置。')] },
@@ -533,7 +541,7 @@ describe('fullCompact 用户原话保真', () => {
 
   it('保真占被压缩段比例过高时退回纯摘要（压缩不该退化成原地搬运）', async () => {
     const { provider } = makeFakeProvider([
-      { textChunks: [], finalContent: [textBlock('摘要正文')] },
+      { textChunks: [], finalContent: [textBlock(longSummary('摘要正文'))] },
     ]);
     // older 段几乎全是用户原话（assistant 极短）→ 占比超阈值 → 不保真
     const msgs: StoredMessage[] = [
@@ -566,7 +574,7 @@ describe('fullCompact 用户原话保真', () => {
 
   it('recent 段的用户消息不进保真（避免与保留的原消息重复）', async () => {
     const { provider } = makeFakeProvider([
-      { textChunks: [], finalContent: [textBlock('摘要')] },
+      { textChunks: [], finalContent: [textBlock(longSummary('摘要'))] },
     ]);
     const msgs: StoredMessage[] = [
       stored({ role: 'user', content: 'OLD-ONLY-IN-VERBATIM' }, 'user'),
@@ -586,7 +594,7 @@ describe('fullCompact 用户原话保真', () => {
 
   it('保真消息不参与轮次计数与回退编辑（origin 与真人输入区分开）', async () => {
     const { provider } = makeFakeProvider([
-      { textChunks: [], finalContent: [textBlock('摘要')] },
+      { textChunks: [], finalContent: [textBlock(longSummary('摘要'))] },
     ]);
     const msgs: StoredMessage[] = [
       stored({ role: 'user', content: '早期关键请求：路径 /tmp/x' }, 'user'),
