@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +11,7 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 import { getLocale, I18N_TABLES, setLocale, t } from '../src/i18n.js';
-import { resolveLanguage, saveLanguage } from '../src/config/config.js';
+import { resolveLanguage, saveDefaultModel, saveLanguage } from '../src/config/config.js';
 import { SLASH_COMMANDS } from '../src/tui/commands.js';
 
 afterEach(() => {
@@ -147,6 +147,71 @@ describe('saveLanguage', () => {
     const parsed = parse(readFileSync(tomlPath, 'utf8')) as Record<string, unknown>;
     expect(parsed['language']).toBe('en');
     expect((parsed['subagent'] as Record<string, unknown>)['max_depth']).toBe(2);
+  });
+});
+
+describe('saveDefaultModel（/model 切换写回默认模型指针）', () => {
+  let dir: string;
+  let tomlPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'stepcode-model-'));
+    fakeHome = dir;
+    tomlPath = join(dir, '.step-code', 'config.toml');
+    mkdirSync(join(dir, '.step-code'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('改写顶层 model 行，其余内容（含 [models.*] 别名表）逐字保留', () => {
+    writeFileSync(
+      tomlPath,
+      '# 我的配置\nmodel = "flash"\napi_key = "sk-x"\n\n[models.explore]\nmodel = "step-explore"\nmax_context_size = 1000000\n',
+    );
+    saveDefaultModel('explore');
+    expect(readFileSync(tomlPath, 'utf8')).toBe(
+      '# 我的配置\nmodel = "explore"\napi_key = "sk-x"\n\n[models.explore]\nmodel = "step-explore"\nmax_context_size = 1000000\n',
+    );
+  });
+
+  it('[models.*] 段内的 model 字段不被误改（顶层与段内同名）', () => {
+    writeFileSync(tomlPath, '[models.explore]\nmodel = "step-explore"\n');
+    saveDefaultModel('explore');
+    const text = readFileSync(tomlPath, 'utf8');
+    // 顶层新增指针；段内的 model = "step-explore" 原样保留
+    expect(text).toBe('model = "explore"\n[models.explore]\nmodel = "step-explore"\n');
+  });
+
+  it('幂等：传入的 current 与新值相同则完全不写文件', () => {
+    const before = 'model = "flash"\napi_key = "sk-x"\n';
+    writeFileSync(tomlPath, before);
+    const mtimeBefore = statSync(tomlPath).mtimeMs;
+    saveDefaultModel('flash', 'flash');
+    expect(readFileSync(tomlPath, 'utf8')).toBe(before);
+    expect(statSync(tomlPath).mtimeMs).toBe(mtimeBefore);
+  });
+
+  it('current 不同则写入', () => {
+    writeFileSync(tomlPath, 'model = "flash"\n');
+    saveDefaultModel('explore', 'flash');
+    expect(readFileSync(tomlPath, 'utf8')).toBe('model = "explore"\n');
+  });
+
+  it('注释掉的 model 行不被当成已有指针：新插一行，旧注释保留', () => {
+    writeFileSync(tomlPath, '# model = "flash"\napi_key = "sk-x"\n');
+    saveDefaultModel('explore');
+    expect(readFileSync(tomlPath, 'utf8')).toBe('# model = "flash"\napi_key = "sk-x"\nmodel = "explore"\n');
+  });
+
+  it('写回后能被 smol-toml 解析，且别名表仍可解出', async () => {
+    writeFileSync(tomlPath, 'api_key = "sk-x"\n\n[models.explore]\nmodel = "step-explore"\n');
+    saveDefaultModel('explore');
+    const { parse } = await import('smol-toml');
+    const parsed = parse(readFileSync(tomlPath, 'utf8')) as Record<string, unknown>;
+    expect(parsed['model']).toBe('explore');
+    expect((parsed['models'] as Record<string, Record<string, unknown>>)['explore']!['model']).toBe('step-explore');
   });
 });
 

@@ -334,4 +334,64 @@ describe('runAgent', () => {
     const ev2 = await collect(runAgent(baseOpts(p2, [sm({ role: 'user', content: 'hi' })])));
     expect(ev2.at(-1)!.type).toBe('turn_done');
   });
+
+  it('续接轮注入：hook 返回续接描述时产出 continuation + turn_done，本 run 结束', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { textChunks: ['第一段'], finalContent: [textBlock('第一段')] },
+    ]);
+    const messages: StoredMessage[] = [sm({ role: 'user', content: 'go' })];
+    const events = await collect(
+      runAgent({
+        ...baseOpts(provider, messages),
+        hooks: { shouldContinueAfterStop: () => ({ inject: '继续推进' }) },
+      }),
+    );
+    // 续接不在本 run 内续跑（轮级驱动：回 App 层发起下一轮），故只有一次模型调用
+    expect(streamCalls()).toBe(1);
+    const cont = events.find((e) => e.type === 'continuation') as
+      | { type: 'continuation'; inject: string }
+      | undefined;
+    expect(cont?.inject).toBe('继续推进');
+    expect(events.at(-1)!.type).toBe('turn_done');
+  });
+
+  it('撞单轮步数上限：hook 返回续接描述时降级为 continuation 而非 error（不杀死 goal）', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { textChunks: [], finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})] },
+      { textChunks: [], finalContent: [toolUseBlock('c2', 'nonexistent_tool', {})] },
+    ]);
+    const messages: StoredMessage[] = [sm({ role: 'user', content: 'go' })];
+    const events = await collect(
+      runAgent({
+        ...baseOpts(provider, messages),
+        maxIterations: 2,
+        hooks: { shouldContinueAfterStop: () => ({ inject: '换下一个 run 继续' }) },
+      }),
+    );
+    // 单轮步数用完 → 正常收尾（continuation + turn_done），由 App 换下一个 run 继续
+    expect(streamCalls()).toBe(2);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    const cont = events.find((e) => e.type === 'continuation') as
+      | { type: 'continuation'; inject: string }
+      | undefined;
+    expect(cont?.inject).toBe('换下一个 run 继续');
+    expect(events.at(-1)!.type).toBe('turn_done');
+  });
+
+  it('撞单轮步数上限：hook 缺省时照旧 error（非 goal 场景回归保护）', async () => {
+    const { provider, streamCalls } = makeFakeProvider([
+      { textChunks: [], finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})] },
+      { textChunks: [], finalContent: [toolUseBlock('c2', 'nonexistent_tool', {})] },
+    ]);
+    const messages: StoredMessage[] = [sm({ role: 'user', content: 'go' })];
+    const events = await collect(
+      runAgent({ ...baseOpts(provider, messages), maxIterations: 2 }),
+    );
+    expect(streamCalls()).toBe(2);
+    expect(events.some((e) => e.type === 'continuation')).toBe(false);
+    const err = events.find((e) => e.type === 'error') as
+      | { type: 'error'; message: string }
+      | undefined;
+    expect(err?.message).toContain('2');
+  });
 });

@@ -110,6 +110,10 @@ export function createSubagentRunner(deps: SubagentRunnerDeps): RunSubagentFn {
     let hadError = false;
     let aborted = false;
     let lastCause: unknown;
+    // 子 agent 剥离 goal 续接：复用主 hooks 会让子 agent 的 end_turn 触发主 goal 的 incrementTurn 污染计量；
+    // Stop hook 续接对子 agent 也不适用（一次性语义在主会话层）
+    const subHooks: LoopHooks = { ...deps.hooks };
+    delete subHooks.shouldContinueAfterStop;
     const run = async (): Promise<void> => {
       for await (const ev of runAgent({
         provider: deps.provider,
@@ -117,7 +121,7 @@ export function createSubagentRunner(deps: SubagentRunnerDeps): RunSubagentFn {
         ctx,
         messages,
         signal: req.signal,
-        hooks: deps.hooks,
+        hooks: subHooks,
         maxIterations: def.maxSteps ?? deps.maxStepsDefault,
         allowedTools: allowed,
         model: def.model,

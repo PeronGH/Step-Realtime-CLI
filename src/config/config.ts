@@ -763,26 +763,30 @@ export function resolveLanguage(raw: unknown): Locale {
 }
 
 /**
- * 把界面语言写回 ~/.step-code/config.toml：只改/追加顶层 `language = "..."` 一行，
+ * 改写/追加 ~/.step-code/config.toml 的一个顶层字符串键：只动目标那一行，
  * 其余内容（注释、其他字段、[section]）原样保留，不做整文件重序列化。
  * 文件不存在时创建最小内容。保留原文件的换行风格（CRLF/LF）。
+ *
+ * 只在顶层区间（第一个 `[section]` 头之前）改/插——插到 section 之后会变成段内字段，
+ * 语义完全不同。重复的顶层同名键只留第一条（防御手工编辑出的重复）。
+ * 注释掉的行（`# key = ...`）不匹配，会在其上方新插一行，旧注释保留。
  */
-export function saveLanguage(l: Locale): void {
+export function saveTopLevelKey(key: string, value: string): void {
   const dir = join(homedir(), '.step-code');
   const tomlPath = join(dir, 'config.toml');
-  const line = `language = "${l}"`;
+  const line = `${key} = "${value}"`;
   const text = existsSync(tomlPath) ? readFileSync(tomlPath, 'utf8') : '';
   const newline = text.includes('\r\n') ? '\r\n' : '\n';
   const lines = text.split(/\r?\n/);
+  const keyPattern = new RegExp(`^${key.replace(/[.*+?^=!:{}()|[\]/\\]/g, (m) => `\\${m}`)}\\s*=`);
 
-  // 只在顶层区间（第一个 [section] 头之前）改/插 language 行；重复行只留第一条（防御）。
   const out: string[] = [];
   let inTopLevel = true;
   let written = false;
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
     if (inTopLevel && trimmed.startsWith('[')) inTopLevel = false;
-    if (inTopLevel && /^language\s*=/.test(trimmed)) {
+    if (inTopLevel && keyPattern.test(trimmed)) {
       if (!written) {
         out.push(line);
         written = true;
@@ -803,4 +807,27 @@ export function saveLanguage(l: Locale): void {
   }
   mkdirSync(dir, { recursive: true });
   writeFileSync(tomlPath, out.join(newline), 'utf8');
+}
+
+/**
+ * 把界面语言写回 ~/.step-code/config.toml 的顶层 `language`。
+ */
+export function saveLanguage(l: Locale): void {
+  saveTopLevelKey('language', l);
+}
+
+/**
+ * 把默认模型指针写回 ~/.step-code/config.toml 的顶层 `model`，使下次启动的新会话沿用
+ * 用户最后一次 /model 选择，不必手改配置文件。
+ *
+ * 写入的是**别名**（`[models.<别名>]` 的 key）而非解析后的真实模型 id：别名承载
+ * 渠道 + 模型 + max_context_size + displayName 一整组绑定，写真实 id 会丢掉这组绑定，
+ * 下次启动 resolveModelEntry 查不到别名，上下文窗口会回落到顶层默认值（压缩判定随之失准）。
+ *
+ * 与会话级 `SessionData.model` 分工不同：后者存真实 id 供 provider 重建，两者不要统一。
+ * 幂等：与当前值相同则不写（省掉无谓的文件写入，缩小与其他 step 进程的写竞争窗口）。
+ */
+export function saveDefaultModel(modelOrAlias: string, current?: string): void {
+  if (current !== undefined && current === modelOrAlias) return;
+  saveTopLevelKey('model', modelOrAlias);
 }

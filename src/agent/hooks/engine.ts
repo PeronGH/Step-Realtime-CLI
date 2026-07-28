@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { HookConfigEntry, HookEventName } from '../../config/config.js';
 import { t } from '../../i18n.js';
 import type { ToolResult } from '../../tools/types.js';
-import type { Authorization, LoopHooks, ToolCallRequest } from '../hooks.js';
+import type { Authorization, LoopHooks, StopContinuation, ToolCallRequest } from '../hooks.js';
 
 /** PostToolUse 传入 hook 的 tool_output 截断长度（字符）。 */
 export const POST_TOOL_OUTPUT_MAX = 2000;
@@ -215,15 +215,14 @@ export interface ComposedLoopHooks extends LoopHooks {
  * - PreToolUse：授权链首，deny-only——exit 2 直接拒（reason 回灌模型），放行则继续走既有审批。
  *   hook 只能否决不能批准，不替代人工审批。
  * - PostToolUse：fire-and-forget，不改写结果（tool_output 截断 {@link POST_TOOL_OUTPUT_MAX} 字符传入）。
- * - Stop：exit 2 时经 onStopContinue 把 reason 注入让模型继续，只给一次续行机会（防死循环标志）。
+ * - Stop：exit 2 时返回续接描述（reason 为注入文本），只给一次续行机会（防死循环标志）。
+ *   续接与 goal 统一走 continuation 事件，由 App/headless 层注入下一轮，引擎不直写 history。
  * @param engine 用户 hooks 引擎。
  * @param base 既有 LoopHooks（权限审批、goal 续跑等），可传 {}。
- * @param opts.onStopContinue Stop 阻断时的续行注入（TUI 推进 history，-p 模式推进 session.messages）。
  */
 export function composeLoopHooks(
   engine: HookEngine,
   base: LoopHooks,
-  opts: { onStopContinue: (reason: string) => void },
 ): ComposedLoopHooks {
   let stopContinuationUsed = false;
   return {
@@ -246,16 +245,15 @@ export function composeLoopHooks(
       if (base.finalizeToolResult === undefined) return result;
       return base.finalizeToolResult(req, result);
     },
-    shouldContinueAfterStop: async (): Promise<boolean> => {
+    shouldContinueAfterStop: async (): Promise<StopContinuation | null> => {
       if (!stopContinuationUsed) {
         const r = await engine.run('Stop', {});
         if (r.blocked) {
           stopContinuationUsed = true;
-          opts.onStopContinue(r.reason ?? t('hook.blocked.noReason'));
-          return true;
+          return { inject: r.reason ?? t('hook.blocked.noReason') };
         }
       }
-      if (base.shouldContinueAfterStop === undefined) return false;
+      if (base.shouldContinueAfterStop === undefined) return null;
       return base.shouldContinueAfterStop();
     },
   };

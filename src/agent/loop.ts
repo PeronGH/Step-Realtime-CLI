@@ -12,7 +12,7 @@ import {
   type CompactionThresholds,
 } from './compaction/compact.js';
 import type { AgentEvent } from './events.js';
-import { type LoopHooks, resolveShouldContinue } from './hooks.js';
+import { type LoopHooks, resolveContinuation } from './hooks.js';
 import { stored, type StoredMessage } from './message.js';
 import { formatSettleNotification } from './background/notify.js';
 import { runTurn } from './runTurn.js';
@@ -242,8 +242,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         if (outcome.usage !== undefined) {
           yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
         }
-        if (await resolveShouldContinue(hooks)) {
-          continue; // goal 模式等：继续下一回合
+        // goal 等自主续接：不在本 run 内续跑，产出 continuation 事件回 App 层，由 App 发起下一轮 run
+        const cont = await resolveContinuation(hooks);
+        if (cont !== null) {
+          yield { type: 'continuation', inject: cont.inject };
         }
         yield { type: 'turn_done' };
         return;
@@ -270,6 +272,16 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         continue; // 有工具结果回灌，进入下一回合
       }
     }
+  }
+
+  // maxIterations 撞线：单轮步数上限降级为「本 run 用完」——hook 给出续接描述时
+  // 产出 continuation + turn_done 正常收尾（换下一个 run 继续，对齐 某竞品 #2210）；
+  // hook 缺省（headless、无 goal）返回 null，照旧 error，非 goal 场景行为不变。
+  const cont = await resolveContinuation(hooks);
+  if (cont !== null) {
+    yield { type: 'continuation', inject: cont.inject };
+    yield { type: 'turn_done' };
+    return;
   }
 
   yield { type: 'error', message: t('loop.maxIterations', { max: maxIterations }) };

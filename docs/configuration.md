@@ -39,7 +39,7 @@ provider = "stepfun"                 # 默认 stepfun（anthropic 协议）
 | `provider` | string | 服务商预设：`stepfun`（默认，anthropic 协议）/ `anthropic` / `openai` / `openai_responses`。预设决定协议与默认端点，见下方[协议与 provider](#协议与-provider) |
 | `api_key` | string | API key |
 | `base_url` | string | API 地址；**是否带 `/v1` 取决于协议**——anthropic 不带（SDK 自拼 `/v1/messages`），openai / openai_responses 要带（拼 `/chat/completions`、`/responses`），见下方[协议与 provider](#协议与-provider) |
-| `model` | string | 模型名，缺省用 provider 预设；可填 `[models]` 里的别名（启动时展开）；可用环境变量或命令行 `--model` 覆盖 |
+| `model` | string | 模型名，缺省用 provider 预设；可填 `[models]` 里的别名（启动时展开）；可用环境变量或命令行 `--model` 覆盖。**会被 `/model` 切换自动改写**（见下方[默认模型自动跟随](#默认模型自动跟随)） |
 | `max_context_size` | int | 上下文上限 token 数，默认 262144 |
 | `max_tokens` | int | 单次响应最大输出 token，默认 65536（足够容纳最高思考档位的预算 + 正文余量，避免思考吃满配额导致正文零输出） |
 | `language` | string | 界面语言：`zh`（默认）/ `en` |
@@ -112,6 +112,26 @@ capabilities = ["thinking", "image_in"] # 可选，字符串数组，原样透�
 
 - 启动时对最终 model 展开一次别名，因此 `--model 别名`、`STEP_CODE_MODEL=别名`、toml 顶层 `model = "别名"` 三条路径同效。
 - 运行时用 `/model` 打开交互式选择器或 `/model <别名>` 直切，切换会按合并配置重建 provider，上下文窗口随之跟随，见[交互使用](./interactive.md)。
+
+#### 默认模型自动跟随
+
+`/model` 切换（选择器确认或 `/model <别名>` 直切）会把顶层 `model` 一并改写为所选**别名**，因此下次启动 `step` 开新会话时自动沿用上次的选择，不需要手改配置文件。
+
+写入行为：
+
+- 只改顶层 `model = ` 那一行；注释、`[providers.*]`、`[models.*]` 各段与原文件的换行风格（CRLF/LF）逐字保留，不做整文件重写。
+- 写的是**别名**而不是展开后的真实模型 id。别名承载「渠道 + 真实模型 + 窗口大小 + 显示名」一整组绑定，写真实 id 会让下次启动查不到别名，`max_context_size` 回落到顶层默认值（压缩时机随之失准）。
+- 与当前值相同时不写盘。
+- 配置文件不可写（只读、权限不足）时，本次切换照常生效，仅在转录区提示一行——配置写入只影响下次启动。
+
+以下两种情况**不会**改动配置文件：
+
+| 场景 | 原因 |
+|------|------|
+| `step --model <x>` 命令行覆盖 | flag 表达的是「本次运行临时用它」，让一次性覆盖产生持久后果违反 flag 语义 |
+| `/resume` 恢复了用别的模型的旧会话 | 恢复是回到那个会话的现场，不是表达对未来新会话的偏好；翻一眼旧会话不该悄悄改掉全局默认 |
+
+多个 step 进程同时切模型时，最后写入者胜出。该竞态只影响「下次启动用哪个」，不损坏配置内容。
 
 ### `[thinking]` 推理过程
 

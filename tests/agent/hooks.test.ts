@@ -57,27 +57,21 @@ describe('LoopHooks', () => {
     expect(toolEnd?.result).toBe('[已脱敏]');
   });
 
-  it('shouldContinueAfterStop=true 时在无工具停止后继续下一回合', async () => {
+  it('shouldContinueAfterStop 返回续接描述时产出 continuation 事件并结束本 run', async () => {
     const { provider, streamCalls } = makeFakeProvider([
       { textChunks: ['第一段'], finalContent: [textBlock('第一段')] },
-      { textChunks: ['第二段'], finalContent: [textBlock('第二段')] },
     ]);
     const messages: StoredMessage[] = [sm('go')];
-    let continued = false;
     const hooks: LoopHooks = {
-      shouldContinueAfterStop: () => {
-        // 第一次续接，第二次停止
-        if (!continued) {
-          continued = true;
-          return true;
-        }
-        return false;
-      },
+      shouldContinueAfterStop: () => ({ inject: '下一轮继续' }),
     };
     const events = await collect(runAgent(base(provider, messages, hooks)));
-    expect(streamCalls()).toBe(2);
-    const texts = events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text);
-    expect(texts).toEqual(['第一段', '第二段']);
+    // 续接不在本 run 内发生：产出 continuation 事件回 App 层，由 App 驱动下一轮
+    expect(streamCalls()).toBe(1);
+    const cont = events.find((e) => e.type === 'continuation') as
+      | { type: 'continuation'; inject: string }
+      | undefined;
+    expect(cont?.inject).toBe('下一轮继续');
     expect(events.at(-1)!.type).toBe('turn_done');
   });
 });

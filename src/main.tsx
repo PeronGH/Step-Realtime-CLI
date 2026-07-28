@@ -337,11 +337,7 @@ function nonInteractiveHooks(): LoopHooks {
   };
   // 用户 hooks 叠加在权限判定之上：PreToolUse 链首 deny-only、PostToolUse fire-and-forget、Stop 一次性续行
   if (hookEngine === undefined) return base;
-  return composeLoopHooks(hookEngine, base, {
-    onStopContinue: (reason) => {
-      session.messages.push(stored({ role: 'user', content: reason }, 'user'));
-    },
-  });
+  return composeLoopHooks(hookEngine, base);
 }
 
 /** 非交互模式：跑一轮 agent。text 格式下 assistant 走 stdout、其余走 stderr；stream-json 下每个事件一行 JSON 到 stdout。 */
@@ -458,7 +454,7 @@ async function runPrint(prompt: string): Promise<void> {
     }),
   };
 
-  for await (const ev of runAgent({
+  const runOnce = (): ReturnType<typeof runAgent> => runAgent({
     provider,
     // SessionStart hook 注入的上下文拼在 system 尾部（仅本轮生效）
     system: hookContext !== '' ? `${composeSystem()}\n\n${hookContext}` : composeSystem(),
@@ -476,9 +472,20 @@ async function runPrint(prompt: string): Promise<void> {
       headTokens: config.compaction.userMessageHeadTokens,
     },
     todos: todosStore.items,
-  })) {
-    emit(ev);
-  }
+  });
+  // Stop hook 续接（headless 无 goal，continuation 只会来自 Stop hook）：
+  // 收到 continuation 时把 inject 注入会话历史再跑一轮；一次性语义由 composeLoopHooks 的防循环标志保证
+  let pendingInject: string | null = null;
+  do {
+    if (pendingInject !== null) {
+      session.messages.push(stored({ role: 'user', content: pendingInject }, 'user'));
+      pendingInject = null;
+    }
+    for await (const ev of runOnce()) {
+      if (ev.type === 'continuation') pendingInject = ev.inject;
+      emit(ev);
+    }
+  } while (pendingInject !== null);
   if (!streamJson) process.stdout.write('\n');
   // drain：把运行期间已终态的后台任务通知打到 stderr（未送达的注入通道降级；仍在运行的任务不等待）
   for (const note of settledNotes) {

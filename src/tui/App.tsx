@@ -13,12 +13,13 @@ import { BackgroundManager, type BackgroundTask } from '../agent/background/mana
 import { decideNotifyRoute, formatSettleNotification } from '../agent/background/notify.js';
 import { emitTerminalNotification } from '../agent/background/terminal-notify.js';
 import { GoalMode, type GoalState } from '../agent/goal/mode.js';
+import { assembleGoalInject, decideGoalTurn } from '../agent/goal/drive.js';
 import { CronScheduler } from '../agent/cron/scheduler.js';
 import { CronJobStore } from '../agent/cron/store.js';
 import { createSubagentRunner } from '../agent/subagent/runner.js';
 import { renderSkillActivation, skillListing, type SkillRegistry, type SkillRegistryDiff } from '../skill/registry.js';
 import type { CompactionConfig, StepCodeConfig, SubagentLimits } from '../config/config.js';
-import { PROVIDER_PRESETS, resolveModelEntry, saveLanguage } from '../config/config.js';
+import { PROVIDER_PRESETS, resolveModelEntry, saveDefaultModel, saveLanguage } from '../config/config.js';
 import { getLocale, setLocale, t, type Locale } from '../i18n.js';
 import { createProvider } from '../provider/factory.js';
 import type { ChatProvider } from '../provider/types.js';
@@ -207,6 +208,9 @@ export function App({
   const modeRef = useRef(initialMode);
   // 当前模型 id 的 ref（persist 落盘用，避免闭包读陈旧 state；applyModelAlias 切换时同步）
   const modelRef = useRef(initialModel);
+  // config.toml 顶层 `model` 的当前值（默认模型指针）：/model 切换时写回并同步此 ref，
+  // 供幂等判定（相等则不重复写文件）。启动值取 config.model。
+  const defaultModelPointerRef = useRef(config.model);
   // plan 模式的 ref（权限守卫与 /plan 切换读它）：与 planMode state 同源于会话快照，
   // 否则恢复会话时 UI 显示 plan 而守卫仍按非 plan 放行工具。
   const planModeRef = useRef(session.planMode ?? false);
@@ -240,6 +244,9 @@ export function App({
   const questionResolver = useRef<((answers: QuestionAnswers) => void) | null>(null);
   // 发送缓冲队列：busy 时输入入队（FIFO），回合结束自动逐条发送。
   const queue = useRef<string[]>([]);
+  // goal 轮级驱动：上一 run 产出的续接描述（finally 里判定后消费）；steer = goal 期间用户留言（下轮注入）
+  const pendingContinuationRef = useRef<{ inject: string } | null>(null);
+  const steerRef = useRef<string[]>([]);
   const [queueLen, setQueueLen] = useState(0);
   // backtrack（双击 Esc 回退编辑上一条）primed 态：ref 供 useInput 闭包读即时值，state 驱动输入框提示渲染。
   const backtrackPrimedRef = useRef(false);
@@ -828,6 +835,11 @@ export function App({
           break;
         case 'aborted':
           // 中止终结当前消息尝试：构成边界，后续回合正文不得续接到残文上
+          // steer 残留倒入 queue 头部：中止后按队列恢复机制续发，用户留言不凭空消失
+          if (steerRef.current.length > 0) {
+            queue.current.unshift(...steerRef.current.splice(0));
+            setQueueLen(queue.current.length);
+          }
           next.push({
             kind: 'note',
             text:
@@ -843,6 +855,10 @@ export function App({
           if (sessionRef.current !== undefined) {
             next.push({ kind: 'note', text: t('app.error.exportHint') });
           }
+          break;
+        case 'continuation':
+          // goal 等自主续接：本 run 结束，续接描述暂存，finally 里判定后由 App 发起下一轮（不进 items）
+          pendingContinuationRef.current = { inject: ev.inject };
           break;
         case 'turn_done':
           break;
@@ -884,29 +900,24 @@ export function App({
         const r = await askApproval({ name: req.name, input: req.input });
         return r.allow ? { decision: 'allow' } : { decision: 'deny', reason: denyReason(r.feedback) };
       },
-      // goal 续跑：active goal 且未超预算时，end_turn 后自动继续下一轮（模型自报停机则停）
+      // goal 续跑（轮级驱动薄壳）：decideGoalTurn 裁决，副作用（计轮/标 blocked）在此层落定；
+      // 返回续接描述后由 runAgent 产 continuation 事件，App 在回合收尾时发起下一轮 run
       shouldContinueAfterStop: () => {
-        const g = goal.current.get();
-        if (g === null || g.status !== 'active') return false;
-        // 硬停：轮次或 token 任一预算超限 → markBlocked（文案区分哪种预算耗尽）
-        const hit = goal.current.exceededBudget();
-        if (hit !== null) {
-          goal.current.update('blocked', t(hit === 'turns' ? 'goal.blocked.turns' : 'goal.blocked.tokens'));
-          pushItem({ kind: 'note', text: t(hit === 'turns' ? 'app.goal.overBudgetTurns' : 'app.goal.overBudgetTokens') });
-          return false;
+        const d = decideGoalTurn(goal.current);
+        if (d.kind === 'stop') return null;
+        if (d.kind === 'blocked') {
+          goal.current.update('blocked', t(d.budget === 'turns' ? 'goal.blocked.turns' : 'goal.blocked.tokens'));
+          pushItem({ kind: 'note', text: t(d.budget === 'turns' ? 'app.goal.overBudgetTurns' : 'app.goal.overBudgetTokens') });
+          return null;
         }
         goal.current.incrementTurn();
-        return true;
+        return { inject: d.inject };
       },
       };
       // 用户 hooks 叠加在既有 LoopHooks 之上（接口不动）：PreToolUse 链首 deny-only、
-      // PostToolUse fire-and-forget、Stop exit 2 时 reason 注入让模型继续（一次性防循环标志）
+      // PostToolUse fire-and-forget、Stop exit 2 时返回续接描述（一次性防循环标志，统一走 continuation 事件）
       if (hookEngine === undefined) return base;
-      return composeLoopHooks(hookEngine, base, {
-        onStopContinue: (reason) => {
-          history.current.push(stored({ role: 'user', content: reason }, 'user'));
-        },
-      });
+      return composeLoopHooks(hookEngine, base);
     },
     [askApproval, askPlanApproval, changeMode, hookEngine, setPlanModeBoth],
   );
@@ -917,7 +928,21 @@ export function App({
    * /model <别名> 文本直切与模型选择器 Enter 确认共用此路径。
    */
   const applyModelAlias = useCallback(
-    (arg: string): void => {
+    (arg: string, opts?: { persistDefault?: boolean }): void => {
+      // 默认模型指针写回 config.toml：让下次启动的新会话沿用本次选择，不必手改配置文件。
+      // 写别名而非解析后的真实 id（别名承载渠道/窗口/显示名整组绑定，见 saveDefaultModel 注释）。
+      // 失败只提示不阻断——本次切换已在内存生效，配置写入只影响下次启动。
+      // persistDefault=false 用于 /resume：恢复旧会话是「回到那个现场」，不是表达对未来新会话的
+      // 偏好，翻一眼旧会话不应悄悄改掉全局默认。
+      const persistPointer = (): void => {
+        if (opts?.persistDefault === false) return;
+        try {
+          saveDefaultModel(arg, defaultModelPointerRef.current);
+          defaultModelPointerRef.current = arg;
+        } catch (e) {
+          pushItem({ kind: 'note', text: t('app.model.persistFailed', { message: (e as Error).message }) });
+        }
+      };
       const resolved = resolveModelEntry(config, arg);
       if (resolved === null) {
         setModel(arg);
@@ -925,6 +950,7 @@ export function App({
         setModelLabel(arg);
         sessionRef.current.model = arg;
         persist();
+        persistPointer();
         pushItem({ kind: 'note', text: t('app.model.switched', { model: arg }) });
         return;
       }
@@ -942,6 +968,7 @@ export function App({
       // 模型是会话级状态：切换即落盘（写会话 model 字段），恢复会话时读回并重建 provider
       sessionRef.current.model = resolved.model;
       persist();
+      persistPointer();
       pushItem({ kind: 'note', text: t('app.model.aliasSwitched', { name: arg, model: resolved.model }) });
     },
     [config, persist, pushItem],
@@ -977,7 +1004,7 @@ export function App({
         const alias = Object.keys(config.models ?? {}).find(
           (a) => (config.models?.[a]?.model ?? a) === data.model,
         );
-        applyModelAlias(alias ?? data.model);
+        applyModelAlias(alias ?? data.model, { persistDefault: false });
       }
       // 清空动态工具，避免上个会话 tool_search 加载的工具泄漏到恢复的会话
       clearDynamicTools();
@@ -1525,13 +1552,22 @@ export function App({
         if (text === '') return; // 图片输入 busy 时暂不入队（简化）
         // busy 时斜杠命令先解析分流：只读/纯 UI 命令（/help /goal /loop /sessions /lang 及无参查询）即时执行，
         // 改动 turn 前提的命令（/model /compact /new 等）与普通消息一样入队
+        let isSlash = false;
         if (imgCount === 0) {
           const parsed = parseSlash(text, pluginCommandNames);
+          isSlash = parsed !== null;
           if (parsed !== null && busyRoute(parsed.name, parsed.args) === 'instant') {
             setInput('');
             handleSlash(text);
             return;
           }
+        }
+        // goal 运行期间的普通留言走 steer：不进 queue，拼进下一个自主轮的注入文本
+        if (imgCount === 0 && !isSlash && goal.current.get()?.status === 'active') {
+          steerRef.current.push(text);
+          setInput('');
+          pushItem({ kind: 'note', text: t('app.goal.steerAdded') });
+          return;
         }
         queue.current.push(text);
         setQueueLen(queue.current.length);
@@ -1717,6 +1753,26 @@ export function App({
           const note = formatSettleNotification(t);
           notifyTextRef.current.add(note);
           queue.current.push(note);
+        }
+        // goal 轮级驱动：上一 run 给出续接描述且 goal 仍 active 时，直接发起下一个自主轮，
+        // 优先于 queue 排空（用户排队消息随后续轮次依次消费）；steer 留言拼进注入文本
+        const cont = pendingContinuationRef.current;
+        pendingContinuationRef.current = null;
+        const g = goal.current.get();
+        if (cont !== null && g !== null && g.status === 'active') {
+          const steers = steerRef.current.splice(0);
+          const text = assembleGoalInject(goal.current, cont.inject, steers);
+          if (text !== null) {
+            setQueueLen(queue.current.length); // drain 补进的通知仍在队列中，续接路径不 shift，先同步显示
+            void submit(text, { silent: true, recordHistory: false });
+            return;
+          }
+        }
+        // Stop hook（exit 2）续行兜底：无 active goal 时，把续接描述作为用户消息直接续行一次
+        // （修复：旧行为下 Stop hook 无 goal 也能续行，重构后只认 goal active 会把 inject 静默丢弃）
+        if (cont !== null) {
+          void submit(cont.inject, { silent: true, recordHistory: false });
+          return;
         }
         // 发送缓冲队列：回合结束后自动按序发送下一条
         const next = queue.current.shift();

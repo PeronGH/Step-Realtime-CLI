@@ -7,6 +7,8 @@ export type AgentEvent =
   | { type: 'tool_end'; id: string; name: string; result: string; isError: boolean }
   | { type: 'retry'; attempt: number; delayMs: number; message: string }
   | { type: 'aborted' }
+  /** goal 等自主续接：本 run 结束，inject 为下一轮注入文本。 */
+  | { type: 'continuation'; inject: string }
   | { type: 'turn_done' }
   | { type: 'notice'; message: string }
   /**

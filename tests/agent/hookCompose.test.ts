@@ -58,7 +58,7 @@ describe('composeLoopHooks 接入点', () => {
       { textChunks: ['明白，我不写了'], finalContent: [textBlock('明白，我不写了')] },
     ]);
     const messages: StoredMessage[] = [stored({ role: 'user', content: '写文件' }, 'user')];
-    const hooks = composeLoopHooks(engine, {}, { onStopContinue: () => {} });
+    const hooks = composeLoopHooks(engine, {});
     const events = await collect(runAgent(base(provider, messages, hooks)));
 
     const toolEnd = events.find((e) => e.type === 'tool_end') as
@@ -85,7 +85,7 @@ describe('composeLoopHooks 接入点', () => {
     ]);
     const messages1: StoredMessage[] = [stored({ role: 'user', content: '写' }, 'user')];
     const events1 = await collect(
-      runAgent(base(denied.provider, messages1, composeLoopHooks(engine, denyBase, { onStopContinue: () => {} }))),
+      runAgent(base(denied.provider, messages1, composeLoopHooks(engine, denyBase))),
     );
     const toolEnd1 = events1.find((e) => e.type === 'tool_end') as { isError: boolean; result: string } | undefined;
     expect(toolEnd1?.isError).toBe(true);
@@ -98,7 +98,7 @@ describe('composeLoopHooks 接入点', () => {
     ]);
     const messages2: StoredMessage[] = [stored({ role: 'user', content: 'ls' }, 'user')];
     const events2 = await collect(
-      runAgent(base(allowed.provider, messages2, composeLoopHooks(engine, {}, { onStopContinue: () => {} }))),
+      runAgent(base(allowed.provider, messages2, composeLoopHooks(engine, {}))),
     );
     const toolEnd2 = events2.find((e) => e.type === 'tool_end') as { isError: boolean } | undefined;
     expect(toolEnd2?.isError).toBe(false);
@@ -118,7 +118,7 @@ describe('composeLoopHooks 接入点', () => {
     ]);
     const messages: StoredMessage[] = [stored({ role: 'user', content: 'ls' }, 'user')];
     const events = await collect(
-      runAgent(base(provider, messages, composeLoopHooks(engine, {}, { onStopContinue: () => {} }))),
+      runAgent(base(provider, messages, composeLoopHooks(engine, {}))),
     );
     const toolEnd = events.find((e) => e.type === 'tool_end') as
       | { isError: boolean; result: string }
@@ -129,48 +129,48 @@ describe('composeLoopHooks 接入点', () => {
     await waitFor(() => existsSync(marker));
   });
 
-  it('Stop exit 2 → reason 注入让模型继续，只给一次续行机会（防死循环）', async () => {
+  it('Stop exit 2 → 返回续接描述（inject 为 reason），统一走 continuation 事件', async () => {
     const script = writeScript('stop.js', `process.stderr.write('还没做完，继续'); process.exit(2);`);
     const engine = makeEngine([{ event: 'Stop', command: cmd(script), timeout: 30 }]);
     const { provider, streamCalls } = makeFakeProvider([
       { textChunks: ['第一段'], finalContent: [textBlock('第一段')] },
-      { textChunks: ['第二段'], finalContent: [textBlock('第二段')] },
     ]);
     const messages: StoredMessage[] = [stored({ role: 'user', content: 'go' }, 'user')];
-    const hooks = composeLoopHooks(engine, {}, {
-      onStopContinue: (reason) => {
-        messages.push(stored({ role: 'user', content: reason }, 'user'));
-      },
-    });
+    const hooks = composeLoopHooks(engine, {});
     const events = await collect(runAgent(base(provider, messages, hooks)));
 
-    // 第一次 end_turn：Stop hook 阻断 → reason 注入 + 续行；第二次 end_turn：一次性标志已用 → 结束
-    expect(streamCalls()).toBe(2);
-    expect(messages.some((m) => m.message.role === 'user' && m.message.content === '还没做完，继续')).toBe(true);
+    // end_turn：Stop hook 阻断 → 产出 continuation（inject = reason）+ turn_done，本 run 结束；
+    // 引擎不再直写 history（消除双写，注入由 App/headless 层消费 continuation 后完成）
+    expect(streamCalls()).toBe(1);
+    const cont = events.find((e) => e.type === 'continuation') as
+      | { type: 'continuation'; inject: string }
+      | undefined;
+    expect(cont?.inject).toBe('还没做完，继续');
     expect(events.at(-1)!.type).toBe('turn_done');
   });
 
-  it('resetStopContinuation 后 Stop hook 可再次续行', async () => {
+  it('Stop 一次性语义：同轮只续一次，resetStopContinuation 后恢复续行机会', async () => {
     const script = writeScript('stop2.js', `process.stderr.write('继续'); process.exit(2);`);
     const engine = makeEngine([{ event: 'Stop', command: cmd(script), timeout: 30 }]);
     const { provider, streamCalls } = makeFakeProvider([
       { textChunks: ['一'], finalContent: [textBlock('一')] },
       { textChunks: ['二'], finalContent: [textBlock('二')] },
       { textChunks: ['三'], finalContent: [textBlock('三')] },
-      { textChunks: ['四'], finalContent: [textBlock('四')] },
     ]);
     const messages: StoredMessage[] = [stored({ role: 'user', content: 'go' }, 'user')];
-    const hooks = composeLoopHooks(engine, {}, {
-      onStopContinue: (reason) => {
-        messages.push(stored({ role: 'user', content: reason }, 'user'));
-      },
-    });
-    // 第一轮：续行一次后结束（2 次调用）
-    await collect(runAgent(base(provider, messages, hooks)));
+    const hooks = composeLoopHooks(engine, {});
+    // 第一轮：Stop 阻断 → continuation
+    const ev1 = await collect(runAgent(base(provider, messages, hooks)));
+    expect(ev1.some((e) => e.type === 'continuation')).toBe(true);
+    expect(streamCalls()).toBe(1);
+    // 第二轮（未复位）：一次性标志已用 → 落回 base（无 goal）→ 结束，无 continuation
+    const ev2 = await collect(runAgent(base(provider, messages, hooks)));
+    expect(ev2.some((e) => e.type === 'continuation')).toBe(false);
     expect(streamCalls()).toBe(2);
     // 复位（模拟新一轮提交）：Stop hook 重新获得一次续行机会
     hooks.resetStopContinuation();
-    await collect(runAgent(base(provider, messages, hooks)));
-    expect(streamCalls()).toBe(4);
+    const ev3 = await collect(runAgent(base(provider, messages, hooks)));
+    expect(ev3.some((e) => e.type === 'continuation')).toBe(true);
+    expect(streamCalls()).toBe(3);
   });
 });
