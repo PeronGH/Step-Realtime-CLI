@@ -175,7 +175,8 @@ export function App({
   const [thinkPickerOpen, setThinkPickerOpen] = useState(false);
   // 会话级思考深度覆盖：undefined = 跟随 config 默认；'off' = 本会话不发 thinking 字段；
   // 其余 = 档位名（budget 取 config.thinking.levels）。与模型覆盖解耦：/model 切换不重置它。
-  const [thinkOverride, setThinkOverride] = useState<ThinkOverride | undefined>(undefined);
+  // 启动时从会话快照回写，支持 resume 后状态栏立即显示恢复后的档位。
+  const [thinkOverride, setThinkOverride] = useState<ThinkOverride | undefined>(session.thinkOverride);
   // 上下文窗口大小做成 state：/model 切别名时跟随别名的 maxContextSize（压缩判定与状态栏共用）。
   const [maxContextSize, setMaxContextSize] = useState(initialMaxContextSize);
   const [busy, setBusy] = useState(false);
@@ -187,7 +188,8 @@ export function App({
   const [mode, setMode] = useState<PermissionMode>(initialMode);
   // 界面语言：值本身不进渲染（t() 读模块级 locale），setState 只为触发整树重渲。初始取配置。
   const [, setLang] = useState<Locale>(config.language ?? 'zh');
-  const [planMode, setPlanMode] = useState(false);
+  // Plan 模式会话级状态：启动时从会话快照回写；恢复别的会话时按存储值回写。
+  const [planMode, setPlanMode] = useState(session.planMode ?? false);
   const [pending, setPending] = useState<ApprovalRequest | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<AskUserRequest | null>(null);
@@ -205,7 +207,11 @@ export function App({
   const modeRef = useRef(initialMode);
   // 当前模型 id 的 ref（persist 落盘用，避免闭包读陈旧 state；applyModelAlias 切换时同步）
   const modelRef = useRef(initialModel);
-  const planModeRef = useRef(false);
+  // plan 模式的 ref（权限守卫与 /plan 切换读它）：与 planMode state 同源于会话快照，
+  // 否则恢复会话时 UI 显示 plan 而守卫仍按非 plan 放行工具。
+  const planModeRef = useRef(session.planMode ?? false);
+  // 思考深度覆盖的 ref（persist 落盘用，避免闭包读陈旧 state；同 modeRef/modelRef 口径）。
+  const thinkOverrideRef = useRef<ThinkOverride | undefined>(session.thinkOverride);
   const history = useRef<StoredMessage[]>(session.messages.slice());
   const sessionRef = useRef<SessionData>(session);
 
@@ -336,6 +342,9 @@ export function App({
     // 避免闭包读到陈旧 state；切换点只需保证调用 persist 即生效。
     sessionRef.current.mode = modeRef.current;
     sessionRef.current.model = modelRef.current;
+    // 思考深度与 plan 模式同为会话级状态：一律从 ref 取（state 会被 persist 的闭包读成陈旧值）
+    sessionRef.current.thinkOverride = thinkOverrideRef.current;
+    sessionRef.current.planMode = planModeRef.current;
     try {
       store.save(sessionRef.current);
       // 全量历史日志：按 id 去重追加 history.current 中尚未写过的消息。
@@ -356,6 +365,12 @@ export function App({
   const setPlanModeBoth = useCallback((on: boolean) => {
     planModeRef.current = on;
     setPlanMode(on);
+  }, []);
+
+  /** 思考深度覆盖：ref 与 state 一起改（ref 供 persist 取即时值，state 驱动状态栏与选择器渲染）。 */
+  const setThinkOverrideBoth = useCallback((next: ThinkOverride | undefined) => {
+    thinkOverrideRef.current = next;
+    setThinkOverride(next);
   }, []);
 
   const pushItem = useCallback((item: DisplayItem) => {
@@ -966,10 +981,13 @@ export function App({
       }
       // 清空动态工具，避免上个会话 tool_search 加载的工具泄漏到恢复的会话
       clearDynamicTools();
-      setPlanModeBoth(false);
+      // 恢复会话级 Plan 模式（旧快照缺失时默认为 false）
+      setPlanModeBoth(data.planMode ?? false);
       prePlanModeRef.current = null;
-      // 思考深度覆盖是会话级状态：恢复到别的会话时回落 config 默认
-      setThinkOverride(undefined);
+      // 恢复会话级思考深度覆盖（旧快照缺失时回落 config 默认）
+      setThinkOverrideBoth(data.thinkOverride);
+      // 变更点已在 ref/state 中落地，补一次持久化把恢复后的运行态写回磁盘
+      persist();
       // resume 无真实 usage：前缀基准归零、游标归零，对恢复的全部历史做字符估算填充状态栏
       // （否则会误显 0，直到用户发出第一条消息拿到真实 usage 才刷新）。下一条真实 usage 再校正。
       baseTokensRef.current = 0;
@@ -998,7 +1016,7 @@ export function App({
       setSessionEpoch((e) => e + 1);
       return true;
     },
-    [applyModelAlias, changeMode, config, ctx.cwd, persist, pushItem, setPlanModeBoth],
+    [applyModelAlias, changeMode, config, ctx.cwd, persist, pushItem, setPlanModeBoth, setThinkOverrideBoth],
   );
 
   /**
@@ -1009,7 +1027,9 @@ export function App({
    */
   const applyThinkLevel = useCallback(
     (name: string): void => {
-      setThinkOverride(name);
+      setThinkOverrideBoth(name);
+      // 思考档位是会话级状态：切换即落盘，恢复会话时读回（与 /model、/permission 同口径）
+      persist();
       const levels = thinkLevelsOf(config.thinking);
       pushItem({
         kind: 'note',
@@ -1031,7 +1051,7 @@ export function App({
         pushItem({ kind: 'note', text: t('app.think.cacheWarning') });
       }
     },
-    [config, pushItem],
+    [config, persist, pushItem, setThinkOverrideBoth],
   );
 
   /** 处理斜杠命令。返回 true 表示已作为命令消费。 */
@@ -1193,6 +1213,8 @@ export function App({
             setPlanModeBoth(true);
             pushItem({ kind: 'note', text: t('app.plan.on') });
           }
+          // plan 是会话级状态：切换即落盘，恢复会话时读回（否则中途退出丢失）
+          persist();
           break;
         }
         case 'goal': {
@@ -1302,7 +1324,7 @@ export function App({
           setPlanModeBoth(false);
           prePlanModeRef.current = null;
           // 思考深度覆盖是会话级状态：新会话回落 config 默认（/fork 复制会话，保留覆盖）
-          setThinkOverride(undefined);
+          setThinkOverrideBoth(undefined);
           setItems([{ kind: 'note', text: t('app.new.started', { id: sessionRef.current.id }) }]);
           setSessionEpoch((e) => e + 1);
           break;

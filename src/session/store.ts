@@ -31,6 +31,10 @@ export interface SessionData extends SessionMeta {
   goal?: GoalState;
   /** 权限模式快照（会话级，随会话持久化；恢复时读回，旧快照缺失回退启动默认）。 */
   mode?: PermissionMode;
+  /** 会话级思考深度覆盖（'off' / 档位名，如 'low' / 'medium' / 'high'），undefined = 回退 config 默认。 */
+  thinkOverride?: string;
+  /** 会话级 Plan 模式。 */
+  planMode?: boolean;
 }
 
 /** 把工作目录映射为稳定、文件系统安全的短键（避免超长路径与非法字符）。 */

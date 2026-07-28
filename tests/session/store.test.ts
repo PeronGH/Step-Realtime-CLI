@@ -161,6 +161,39 @@ describe('SessionStore', () => {
     expect(store.load(cwd, s.id)!.model).toBe('step-3.7-flash');
   });
 
+  it('思考深度覆盖随会话 save/load 往返；旧快照缺失读出 undefined', () => {
+    const s = store.create(cwd, 'm');
+    // 新建会话未切档 → 缺失（恢复时由调用方回落 config 默认档位）
+    store.save(s);
+    expect(store.load(cwd, s.id)!.thinkOverride).toBeUndefined();
+    // 切档位后落盘读回
+    const loaded = store.load(cwd, s.id)!;
+    loaded.thinkOverride = 'high';
+    store.save(loaded);
+    expect(store.load(cwd, s.id)!.thinkOverride).toBe('high');
+    // 'off'（本会话不发 thinking 字段）与档位名同为合法值，不能被当成"未设置"
+    const off = store.load(cwd, s.id)!;
+    off.thinkOverride = 'off';
+    store.save(off);
+    expect(store.load(cwd, s.id)!.thinkOverride).toBe('off');
+  });
+
+  it('plan 模式随会话 save/load 往返；旧快照缺失读出 undefined', () => {
+    const s = store.create(cwd, 'm');
+    store.save(s);
+    expect(store.load(cwd, s.id)!.planMode).toBeUndefined();
+    // 开 plan 后落盘读回 true
+    const loaded = store.load(cwd, s.id)!;
+    loaded.planMode = true;
+    store.save(loaded);
+    expect(store.load(cwd, s.id)!.planMode).toBe(true);
+    // 关掉后读回 false（显式 false 与缺失语义不同：前者是用户关过，后者是旧快照）
+    const off = store.load(cwd, s.id)!;
+    off.planMode = false;
+    store.save(off);
+    expect(store.load(cwd, s.id)!.planMode).toBe(false);
+  });
+
   it('latest 返回最近更新的会话', async () => {
     const a = store.create(cwd, 'm');
     store.save(a);
