@@ -45,6 +45,15 @@ import { MessageItem, MessageList, ThinkingPreview, THINKING_PREVIEW_LINES, appe
 import { ModelPicker, type ModelPickerItem } from './ModelPicker.js';
 import { SessionPicker, relativeTime } from './SessionPicker.js';
 import { ThinkPicker, type ThinkPickerItem } from './ThinkPicker.js';
+import { UndoPicker, type UndoPickerItem } from './UndoPicker.js';
+import {
+  clearUndoSnapshots,
+  computeUndo,
+  popUndoSnapshots,
+  pushUndoSnapshot,
+  truncateItemsAtTurns,
+  type UndoSnapshot,
+} from './undo.js';
 import {
   parseThinkArgs,
   thinkBudgetSafety,
@@ -56,7 +65,7 @@ import {
 } from './thinkCommand.js';
 import { PromptInput, computePromptRows } from './PromptInput.js';
 import { QueuePreview } from './QueuePreview.js';
-import { computeBacktrack, truncateItemsAtLastUser } from './backtrack.js';
+import { computeBacktrack, extractUserText, truncateItemsAtLastUser } from './backtrack.js';
 import { StatusBar } from './StatusBar.js';
 import { TodoPanel, allTodosDone } from './TodoPanel.js';
 import { WorkingStatus } from './WorkingStatus.js';
@@ -174,6 +183,8 @@ export function App({
   const [sessionPickerItems, setSessionPickerItems] = useState<SessionMeta[]>([]);
   // /think 无参唤起的交互式思考深度选择器（同 ModelPicker 弹层挂载模式）。
   const [thinkPickerOpen, setThinkPickerOpen] = useState(false);
+  // /undo 无参唤起的交互式轮次选择器（同 ModelPicker 弹层挂载模式）。
+  const [undoPickerOpen, setUndoPickerOpen] = useState(false);
   // 会话级思考深度覆盖：undefined = 跟随 config 默认；'off' = 本会话不发 thinking 字段；
   // 其余 = 档位名（budget 取 config.thinking.levels）。与模型覆盖解耦：/model 切换不重置它。
   // 启动时从会话快照回写，支持 resume 后状态栏立即显示恢复后的档位。
@@ -247,6 +258,9 @@ export function App({
   // goal 轮级驱动：上一 run 产出的续接描述（finally 里判定后消费）；steer = goal 期间用户留言（下轮注入）
   const pendingContinuationRef = useRef<{ inject: string } | null>(null);
   const steerRef = useRef<string[]>([]);
+  // /undo 附带状态快照栈：每轮 submit 首次改动 history 前压栈（该轮前的 todos/plan/prePlanMode + historyLen），
+  // undo 按撤销轮数弹栈恢复；/new /resume /fork /compact 时清栈（防跨会话错乱；压缩后旧快照失去意义）。
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
   const [queueLen, setQueueLen] = useState(0);
   // backtrack（双击 Esc 回退编辑上一条）primed 态：ref 供 useInput 闭包读即时值，state 驱动输入框提示渲染。
   const backtrackPrimedRef = useRef(false);
@@ -625,6 +639,48 @@ export function App({
     setUsedTokens(baseTokensRef.current + (tail.length > 0 ? estimateTokens(tail) : 0));
   }, []);
 
+  /**
+   * /undo 执行体（文本直执与 UndoPicker Enter 确认共用此路径）：撤销最近 count 轮用户 prompt，
+   * history 截到该轮起点之前，转录区同步截断，附带状态（todos/plan/prePlanMode）按快照栈弹栈恢复；
+   * 不回滚 goal 计量与代码改动，不 prefill 输入框（与 backtrack 的单轮编辑语义刻意区分）。
+   * sessionEpoch 递增重挂 <Static>（数组变短不重挂会留幽灵条目）；token 显示按截断后全量重估回落。
+   */
+  const performUndo = useCallback(
+    (count: number): void => {
+      const result = computeUndo(history.current, count);
+      if (result === null) {
+        pushItem({ kind: 'note', text: t('app.undo.none') });
+        return;
+      }
+      const snapshot = popUndoSnapshots(undoStackRef.current, result.removedTurns);
+      if (snapshot !== undefined) {
+        // 附带状态回滚到被撤销最早那轮之前
+        todos.current = [...snapshot.todos];
+        setPlanModeBoth(snapshot.planMode);
+        prePlanModeRef.current = snapshot.prePlanMode;
+        // 快照的 historyLen 是该轮首次改动 history 前的精确边界（含 hook 注入的前置 user 消息）；
+        // 循环内自动压缩会把它变成陈旧下标（> 当前长度），此时回退到 computeUndo 的轮边界扫描结果。
+        history.current =
+          snapshot.historyLen <= history.current.length
+            ? history.current.slice(0, snapshot.historyLen)
+            : result.history;
+      } else {
+        // 无快照可恢复（resume/fork/compact 清栈后撤销幸存轮）：只回退 history，附带状态保持现状
+        history.current = result.history;
+      }
+      setItems((prev) => truncateItemsAtTurns(prev, result.removedTurns));
+      persist();
+      setSessionEpoch((e) => e + 1);
+      // token 回落：截断点之后无真实 usage 可覆盖，基准与游标归零、对截断后全量重估（对齐 /resume 口径），
+      // 下一条真实 usage 再校正。
+      baseTokensRef.current = 0;
+      measuredLenRef.current = 0;
+      refreshContextUsage();
+      pushItem({ kind: 'note', text: t('app.undo.done', { count: result.removedTurns }) });
+    },
+    [persist, pushItem, refreshContextUsage, setPlanModeBoth],
+  );
+
   // 卸载时清掉 primed 定时器，避免泄漏。
   useEffect(() => () => {
     if (backtrackTimerRef.current !== null) clearTimeout(backtrackTimerRef.current);
@@ -679,6 +735,10 @@ export function App({
     }
     // 思考深度选择器打开时：全部按键交给 ThinkPicker 自身的 useInput 处理（↑↓/Enter/Esc），App 不插手
     if (thinkPickerOpen) {
+      return;
+    }
+    // undo 选择器打开时：全部按键交给 UndoPicker 自身的 useInput 处理（↑↓/Enter/Esc），App 不插手
+    if (undoPickerOpen) {
       return;
     }
     // 会话选择器打开时：全部按键交给 SessionPicker 自身的 useInput 处理（↑↓/过滤/Enter/删除/Esc），App 不插手
@@ -1011,6 +1071,8 @@ export function App({
       // 恢复会话级 Plan 模式（旧快照缺失时默认为 false）
       setPlanModeBoth(data.planMode ?? false);
       prePlanModeRef.current = null;
+      // 跨会话切换：undo 快照栈清空（旧会话的快照对新会话无意义，防错乱）
+      clearUndoSnapshots(undoStackRef.current);
       // 恢复会话级思考深度覆盖（旧快照缺失时回落 config 默认）
       setThinkOverrideBoth(data.thinkOverride);
       // 变更点已在 ref/state 中落地，补一次持久化把恢复后的运行态写回磁盘
@@ -1324,6 +1386,8 @@ export function App({
           // fork 不继承 goal：清掉内存态与徽标（源会话的 goal 字段已在盘上，不受影响）
           goal.current.restore(null);
           setGoalView(null);
+          // 跨会话切换：undo 快照栈清空（fork 后是新会话 id，旧快照不随谱系继承）
+          clearUndoSnapshots(undoStackRef.current);
           pushItem({
             kind: 'note',
             text: t('app.fork.done', {
@@ -1350,6 +1414,8 @@ export function App({
           clearDynamicTools();
           setPlanModeBoth(false);
           prePlanModeRef.current = null;
+          // 跨会话切换：undo 快照栈清空
+          clearUndoSnapshots(undoStackRef.current);
           // 思考深度覆盖是会话级状态：新会话回落 config 默认（/fork 复制会话，保留覆盖）
           setThinkOverrideBoth(undefined);
           setItems([{ kind: 'note', text: t('app.new.started', { id: sessionRef.current.id }) }]);
@@ -1375,6 +1441,8 @@ export function App({
                   headTokens: compaction.userMessageHeadTokens,
                 },
               );
+              // 压缩是 undo 水位线：被吞掉的轮对应的快照已无意义，清栈（幸存 recent 轮的撤销退化为只回退 history）
+              clearUndoSnapshots(undoStackRef.current);
               const after = estimateTokens(history.current);
               // 状态栏 context 用量立即回落（否则要等下一条消息的 usage 事件才刷新，看起来像没压）。
               // after 是压缩后全量估算，覆盖当前所有消息：基准设为 after、游标设为全长，
@@ -1391,6 +1459,25 @@ export function App({
               busyRef.current = false;
             }
           })();
+          break;
+        }
+        case 'undo': {
+          const arg = args.trim();
+          if (arg === '') {
+            // 无参：有可撤销轮时弹选择器（busy 时经 busyRoute 排队，到回合边界才走到这里）
+            if (computeUndo(history.current, 1) === null) {
+              pushItem({ kind: 'note', text: t('app.undo.none') });
+              break;
+            }
+            setUndoPickerOpen(true);
+            break;
+          }
+          const n = Number(arg);
+          if (!Number.isInteger(n) || n < 1) {
+            pushItem({ kind: 'note', text: t('app.undo.invalid', { arg }) });
+            break;
+          }
+          performUndo(n);
           break;
         }
         case 'reflect': {
@@ -1532,7 +1619,7 @@ export function App({
       }
       return true;
     },
-    [applyModelAlias, applyThinkLevel, changeMode, compaction, config, ctx.cwd, exit, mcp, model, persist, pluginCommandMap, pluginCommandNames, pushItem, reloadSkills, setPlanModeBoth, skillConflictNote, skillsRef, store, thinkOverride],
+    [applyModelAlias, applyThinkLevel, changeMode, compaction, config, ctx.cwd, exit, mcp, model, performUndo, persist, pluginCommandMap, pluginCommandNames, pushItem, reloadSkills, setPlanModeBoth, skillConflictNote, skillsRef, store, thinkOverride],
   );
 
   const submit = useCallback(
@@ -1580,10 +1667,21 @@ export function App({
       // 斜杠命令仅在无图片、纯命令时走命令分支；静默注入（cron/后台通知）不解析斜杠，防定时 prompt 被当成命令截获
       if (!opts?.silent && imgCount === 0 && handleSlash(text)) return;
 
+      // /undo 快照压栈：在本轮首次改动 history 之前留存该轮前的附带状态
+      // （hook 注入也算本轮改动，故压栈放在 hook 之前；静默注入轮同样压栈，与轮次口径一致）。
+      pushUndoSnapshot(undoStackRef.current, {
+        historyLen: history.current.length,
+        todos: [...todos.current],
+        planMode: planModeRef.current,
+        prePlanMode: prePlanModeRef.current,
+      });
+
       // UserPromptSubmit hook：stdout 非空作为上下文注入本轮；exit 2 阻断本轮不发模型（输入退回输入框）
       if (hookEngine !== undefined && !opts?.silent) {
         const up = await hookEngine.run('UserPromptSubmit', { prompt: text });
         if (up.blocked) {
+          // 本轮未发生：回补刚才压的 undo 快照，保持栈与实际轮次一一对应
+          undoStackRef.current.pop();
           setInput(text);
           return;
         }
@@ -1854,6 +1952,21 @@ export function App({
     })),
     { name: 'off', detail: t('thinkPicker.offDetail'), current: thinkOverride === 'off' },
   ];
+  // undo 选择器候选：只列 origin==='user' 的轮起点（压缩产物 user_verbatim/compaction_summary 天然排除），
+  // 逆序（最近在上），count = 选中该项要撤销的轮数。仅弹层打开时装配（history 可能很长，避免每帧全扫）。
+  const undoPickerItems: UndoPickerItem[] = [];
+  if (undoPickerOpen) {
+    const userTurns = history.current.filter((m) => m.origin === 'user');
+    for (let i = userTurns.length - 1; i >= 0; i--) {
+      const m = userTurns[i]!;
+      const summary = extractUserText(m).replace(/\s+/g, ' ').trim();
+      undoPickerItems.push({
+        count: userTurns.length - i,
+        label: summary.length > 40 ? `${summary.slice(0, 40)}…` : summary,
+        detail: relativeTime(m.ts),
+      });
+    }
+  }
   const staticEntries: Array<{ kind: 'welcome' } | DisplayItem> = [
     { kind: 'welcome' },
     ...items.slice(0, settledCount),
@@ -1923,6 +2036,19 @@ export function App({
       (history.current.length > 0 ? wrappedRows(t('app.think.cacheWarning'), overlayInner) : 0) +
       Math.max(itemRows, thinkPickerItems.length > 0 ? 1 : wrappedRows(t('thinkPicker.empty'), overlayInner)) +
       wrappedRows(t('thinkPicker.hint'), overlayInner);
+  } else if (undoPickerOpen) {
+    // undo 选择器（上界估算）：margin 1 + 边框 2 + 标题/提示（折行）+ 全部轮次条目（折行）
+    const colW = Math.max(0, ...undoPickerItems.map((m) => m.label.length));
+    const itemRows = undoPickerItems.reduce((n, m) => {
+      const width = 2 + colW + 2 + displayWidth(m.detail);
+      return n + (overlayInner === undefined ? 1 : Math.max(1, Math.ceil(width / overlayInner)));
+    }, 0);
+    promptRows =
+      1 +
+      2 +
+      wrappedRows(t('app.undo.title'), overlayInner) +
+      Math.max(itemRows, undoPickerItems.length > 0 ? 1 : wrappedRows(t('app.undo.empty'), overlayInner)) +
+      wrappedRows(t('app.undo.hint'), overlayInner);
   } else if (sessionPickerOpen) {
     // 会话选择器（上界估算，宁多勿少）：margin 1 + 边框 2 + 标题（折行）+ 搜索行 1
     // + 条目行（每条 = 指针 2 + 标题 + 当前标记 + 间隔 2 + 相对时间/条数，折行后取最宽的 ≤PAGE_SIZE 条）
@@ -2067,6 +2193,14 @@ export function App({
           onSelect={(name) => {
             setThinkPickerOpen(false);
             if (name !== null) applyThinkLevel(name);
+          }}
+        />
+      ) : undoPickerOpen ? (
+        <UndoPicker
+          items={undoPickerItems}
+          onSelect={(count) => {
+            setUndoPickerOpen(false);
+            if (count !== null) performUndo(count);
           }}
         />
       ) : sessionPickerOpen ? (

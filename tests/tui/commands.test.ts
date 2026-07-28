@@ -40,6 +40,11 @@ describe('parseSlash', () => {
     expect(parseSlash('/provider anthropic')).toEqual({ name: 'provider', args: 'anthropic' });
     expect(parseSlash('/provider')).toEqual({ name: 'provider', args: '' });
   });
+
+  it('解析 /undo 命令与轮数参数', () => {
+    expect(parseSlash('/undo 3')).toEqual({ name: 'undo', args: '3' });
+    expect(parseSlash('/undo')).toEqual({ name: 'undo', args: '' });
+  });
 });
 
 describe('SLASH_COMMANDS 注册表', () => {
@@ -126,10 +131,12 @@ describe('busyRoute', () => {
   });
 
   it('改动 turn 前提的命令 busy 时排队', () => {
-    for (const name of ['yolo', 'auto', 'plan', 'fork', 'new', 'compact', 'reflect', 'export-debug-zip', 'resume', 'exit']) {
+    for (const name of ['yolo', 'auto', 'plan', 'fork', 'new', 'compact', 'undo', 'reflect', 'export-debug-zip', 'resume', 'exit']) {
       expect(busyRoute(name, '')).toBe('queue');
     }
     expect(busyRoute('resume', 'abc')).toBe('queue');
+    // undo 带参无参都是状态变更（回退历史与附带状态），一律排队到回合边界
+    expect(busyRoute('undo', '3')).toBe('queue');
   });
 
   it('未知命令即时提示，不等回合结束', () => {

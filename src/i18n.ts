@@ -135,6 +135,14 @@ const zh = {
   'app.think.followDefault': '跟随配置默认',
   'app.think.noDefault': '未设置',
 
+  // --- /undo 命令与轮次选择器（UndoPicker）---
+  'app.undo.title': '撤销到哪一轮',
+  'app.undo.empty': '没有可撤销的轮',
+  'app.undo.hint': '↑/↓ 选择 · Enter 撤销到该轮 · Esc 取消',
+  'app.undo.none': '没有可撤销的轮（压缩点之前的历史不可撤销）',
+  'app.undo.invalid': '无效的轮数：{arg}（用法：/undo [正整数]）',
+  'app.undo.done': '已撤销 {count} 轮对话（上下文与任务清单/计划模式已回滚；代码改动不受影响）',
+
   // --- TODO 面板（TodoPanel）---
   'todo.title': '任务清单',
   'todo.more': '… +{count} more',
@@ -321,6 +329,7 @@ const zh = {
   'cmd.fork': '从当前会话分叉出新会话副本（保留当前历史与任务清单），原会话不动',
   'cmd.new': '开始新会话（清空上下文并新建会话记录）',
   'cmd.compact': '压缩上下文：把较早对话总结为摘要以腾出窗口',
+  'cmd.undo': '撤销最近 N 轮对话（回滚上下文与任务清单/计划模式，代码改动不受影响）：/undo [N]',
   'cmd.reflect': '回顾完整对话历史，沉淀可复用的方法论经验（打印到终端）',
   'cmd.export-debug-zip': '导出调试 zip（发给我们排查 bug，请勿公开分享）',
   'cmd.sessions': '列出本工作目录下的历史会话',
@@ -486,6 +495,14 @@ const en: Record<keyof typeof zh, string> = {
   'app.think.levelLine': '  {name} = {budget}',
   'app.think.followDefault': 'follow config default',
   'app.think.noDefault': 'not set',
+
+  // --- /undo command and turn picker (UndoPicker) ---
+  'app.undo.title': 'Undo back to which turn',
+  'app.undo.empty': 'No turns to undo',
+  'app.undo.hint': '↑/↓ select · Enter undo to this turn · Esc cancel',
+  'app.undo.none': 'Nothing to undo (history before a compaction point cannot be undone)',
+  'app.undo.invalid': 'Invalid count: {arg} (usage: /undo [positive integer])',
+  'app.undo.done': 'Undid {count} turn(s) (context and todo list/plan mode rolled back; code changes are not reverted)',
 
   'todo.title': 'Tasks',
   'todo.more': '… +{count} more',
@@ -658,6 +675,7 @@ const en: Record<keyof typeof zh, string> = {
   'cmd.fork': 'Fork a copy of the current session (keeping history and tasks); the original is untouched',
   'cmd.new': 'Start a new session (clear context, create a new session record)',
   'cmd.compact': 'Compact context: summarize earlier conversation to free up window',
+  'cmd.undo': 'Undo the last N turns (rolls back context and todo/plan state; code changes are not reverted): /undo [N]',
   'cmd.reflect': 'Review full conversation history and distill reusable methodology (prints to terminal)',
   'cmd.export-debug-zip': 'Export a debug zip (send to us for troubleshooting; do not share publicly)',
   'cmd.sessions': 'List past sessions in this working directory',
