@@ -125,6 +125,17 @@ export function insertText(s: PromptEditState, input: string): PromptEditState {
 }
 
 /**
+ * 粘贴文本归一：CRLF / 裸 CR 统一为 LF。
+ * 终端粘贴的 Windows 换行含 \r，原样进值后 \r 按回车语义渲染——后续字符被写到
+ * 行首覆盖已有内容（实测：'abc\r\ndef' 的 \r 把行尾 padding 甩回行首，视觉上
+ * 换行后的内容出现在上一行最前面）；\r 还会随消息原样发给模型。
+ * 无 \r 时原样返回（常见路径零分配）。
+ */
+export function normalizePastedText(input: string): string {
+  return input.includes('\r') ? input.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : input;
+}
+
+/**
  * 按键 → 编辑动作映射（纯函数解析层）。
  * 返回 null 表示不是编辑键，交给后续可打印字符插入分支。
  * 注意次序：Ctrl+←/→ 须在裸 ←/→ 之前判定（ctrl 标志更具体）。

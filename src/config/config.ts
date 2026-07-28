@@ -145,7 +145,7 @@ export interface StepCodeConfig {
   model: string;
   /** 模型上下文上限（token）。默认对齐内置默认模型的窗口（256K）；更大窗口的模型需经 config.toml max_context_size 显式声明。 */
   maxContextSize: number;
-  /** 单次响应最大输出 token。默认 32768（对未知模型的 fallback 量级），避免长输出/大段代码中途截断。可经 config.toml max_tokens 覆盖。 */
+  /** 单次响应最大输出 token。默认 65536（给 high 档 thinking 预算留足正文余量，避免思考吃满预算致正文零输出；也避免长输出/大段代码中途截断）。可经 config.toml max_tokens 覆盖。 */
   maxTokens: number;
   /** 子 agent 限制。 */
   subagent: SubagentLimits;
@@ -176,7 +176,7 @@ export interface StepCodeConfig {
 const DEFAULT_BASE_URL = 'https://api.stepfun.com';
 const DEFAULT_MODEL = 'step-3.7-flash';
 const DEFAULT_MAX_CONTEXT = 262_144;
-const DEFAULT_MAX_TOKENS = 32768;
+const DEFAULT_MAX_TOKENS = 65536;
 
 /**
  * provider 协议维度：决定 provider 工厂分发到哪个适配器实现。
@@ -234,6 +234,9 @@ const COMPACTION_TRIGGER_RATIO_MAX = 0.99;
 const COMPACTION_RESERVED_TOKENS_DEFAULT = 32_000;
 const COMPACTION_RESERVED_TOKENS_MIN = 0;
 const COMPACTION_RESERVED_TOKENS_MAX = 500_000;
+// 用户原话保真预算的 clamp 边界（默认值在 compact.ts，此处只做上下界防御）。
+const COMPACTION_USER_TOKENS_MIN = 0;
+const COMPACTION_USER_TOKENS_MAX = 200_000;
 
 // 后台任务超时 clamp 边界（默认 600 在消费方落，0 = 不限）。
 const BACKGROUND_TASK_TIMEOUT_MIN = 0;
@@ -394,6 +397,20 @@ export function resolveCompactionConfig(raw: unknown): CompactionConfig {
   // 压缩专用模型：未配置时键不进结果对象（下游 toEqual 精确断言依赖此形态）
   const model = asString(t['model']);
   if (model !== undefined) cfg.model = model;
+  // 用户原话保真预算：未配置时键不进结果对象，由 compact.ts 的默认常数生效
+  const userMax = asNumber(t['user_message_max_tokens']);
+  if (userMax !== undefined) {
+    cfg.userMessageMaxTokens = Math.min(
+      COMPACTION_USER_TOKENS_MAX,
+      Math.max(COMPACTION_USER_TOKENS_MIN, Math.round(userMax)),
+    );
+  }
+  const userHead = asNumber(t['user_message_head_tokens']);
+  if (userHead !== undefined) {
+    // head 不得超过总预算（超了等于把预算全给最早消息，最近意图反而丢光）
+    const ceiling = cfg.userMessageMaxTokens ?? COMPACTION_USER_TOKENS_MAX;
+    cfg.userMessageHeadTokens = Math.min(ceiling, Math.max(COMPACTION_USER_TOKENS_MIN, Math.round(userHead)));
+  }
   return cfg;
 }
 

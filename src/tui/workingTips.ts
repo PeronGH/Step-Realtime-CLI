@@ -38,6 +38,39 @@ function tipPool(): string[] {
 }
 
 /**
+ * 忙碌态状态词池（spinner 行的动词，如「思考中」「推理中」）。
+ * mount 时随机取一次、整轮固定（参考 Claude Code SpinnerVerbs：随机词 + 词尾加「…」）。
+ * 与 tip 不同：状态词是 spinner 行本体的一部分，短、无命令；tip 是下方独立一行的用法提示。
+ */
+export const WORKING_VERBS: string[] = [
+  '思考中',
+  '推理中',
+  '琢磨中',
+  '梳理中',
+  '盘算中',
+  '构思中',
+  '斟酌中',
+  '组织中',
+];
+
+export const WORKING_VERBS_EN: string[] = [
+  'Thinking',
+  'Reasoning',
+  'Pondering',
+  'Musing',
+  'Cogitating',
+  'Deliberating',
+  'Composing',
+  'Ruminating',
+];
+
+/** 随机取一个状态词（不含尾部省略号，调用方自行拼「…」）。 */
+export function pickWorkingVerb(): string {
+  const pool = getLocale() === 'en' ? WORKING_VERBS_EN : WORKING_VERBS;
+  return pool[Math.floor(Math.random() * pool.length)] ?? pool[0] ?? '';
+}
+
+/**
  * 随机抽一条 tip。exclude 传上一条以避免连续重复；
  * 池仅一条（或排除后为空）时退化为直接返回，不做排除。
  */

@@ -39,9 +39,11 @@ export function ThinkingPreview({ text, maxLines = THINKING_PREVIEW_LINES }: { t
  *
  * 规则（仅 busy 时才可能有未完条目；非 busy 时回合已结束，全部定稿——
  * 包括 abort 残留的 status === 'running' 工具，此后不会再有任何事件更新它）：
- * - 仅**末尾**的 assistant 仍可能流式增长（text 事件只往末尾 assistant 追加；
- *   其后一旦出现任何条目，新文本会另开 assistant 条目，旧条物理上不可能再增长），
- *   且 busy 期间以 transient（关高亮）渲染，形态未定，留动态区。
+ * - 仅**有效末尾**的 assistant 仍可能流式增长：text 事件只往末尾 assistant 追加，
+ *   UI 侧提示（非 boundary 的 note，如队列回执）透明——assistant 后只跟这类提示时
+ *   它仍未闭合，流式正文会越过提示续接（见 appendStreamText）；
+ *   除透明提示外，其后一旦出现任何条目，新文本会另开 assistant 条目，旧条物理上不可能再增长。
+ *   busy 期间以 transient（关高亮）渲染，形态未定，留动态区。
  *   非末尾的 assistant 即时定稿——长正文流完进入工具执行期后不再被窗口化压整轮，
  *   「已隐藏 N 行」随定稿释放，全文立即进 scrollback。
  * - busy 时 status === 'running' 的 tool 条目还会被 tool_end 更新；
@@ -51,10 +53,16 @@ export function ThinkingPreview({ text, maxLines = THINKING_PREVIEW_LINES }: { t
 export function countSettledItems(items: DisplayItem[], busy: boolean): number {
   if (!busy) return items.length;
   let settled = items.length;
-  // 末尾 assistant：可能仍在流式增长 + transient 高亮态未完成
-  const last = items[items.length - 1];
-  if (last !== undefined && last.kind === 'assistant') {
-    settled = items.length - 1;
+  // 有效末尾：UI 侧提示（非 boundary 的 note）透明——assistant 后只跟这类提示时
+  // 它仍可能流式增长（流式正文会越过提示续接，见 appendStreamText）
+  let tail = items.length - 1;
+  while (tail >= 0) {
+    const it = items[tail]!;
+    if (it.kind === 'note' && it.boundary !== true) tail -= 1;
+    else break;
+  }
+  if (tail >= 0 && items[tail]!.kind === 'assistant') {
+    settled = tail;
   }
   // 运行中的工具（含 workflow 面板运行中）：后续还有 tool_end / 步骤事件更新
   for (let i = 0; i < items.length; i++) {
@@ -64,6 +72,35 @@ export function countSettledItems(items: DisplayItem[], busy: boolean): number {
     }
   }
   return settled;
+}
+
+/**
+ * 流式正文追加（applyEvent 的 text 事件）：末尾是 assistant 则续写；末尾是 UI 侧提示
+ * （非 boundary 的 note，如「已加入发送队列」回执、busy 中即时执行的斜杠命令输出）
+ * 则越过连续的提示续接上一条 assistant——提示是 UI 侧插入，不构成消息边界，
+ * 一条流式消息不应被劈成两截显示（提示保持在其后，位置不动）。
+ * 其余情况（boundary note、工具、thinking 等在尾）另开新 assistant 条目。
+ */
+export function appendStreamText(items: DisplayItem[], text: string): DisplayItem[] {
+  const next = [...items];
+  const last = next[next.length - 1];
+  if (last !== undefined && last.kind === 'assistant') {
+    next[next.length - 1] = { ...last, text: last.text + text };
+    return next;
+  }
+  let i = next.length - 1;
+  while (i >= 0) {
+    const it = next[i]!;
+    if (it.kind === 'note' && it.boundary !== true) i -= 1;
+    else break;
+  }
+  if (i >= 0 && i < next.length - 1 && next[i]!.kind === 'assistant') {
+    const a = next[i] as Extract<DisplayItem, { kind: 'assistant' }>;
+    next[i] = { ...a, text: a.text + text };
+    return next;
+  }
+  next.push({ kind: 'assistant', text });
+  return next;
 }
 
 /**
@@ -82,12 +119,17 @@ export function MessageItem({
 }): React.ReactElement {
   switch (item.kind) {
     case 'user':
+      // 正文必须包一层 Box 防 Ink squash：两个 Text 兄弟会被合并成一个文本块统一折行，
+      // '› ' 尾空格落在断行点时被吞、续行只剩 1 空格（实测：长行/多行输入排版错位）。
+      // 包 Box 后正文在自己的 Yoga 盒子里折行，续行稳定保持 2 列悬挂缩进。
       return (
         <Box marginTop={1}>
           <Text color="blue" bold>
             {'› '}
           </Text>
-          <Text color="yellow">{item.text}</Text>
+          <Box flexShrink={1}>
+            <Text color="yellow">{item.text}</Text>
+          </Box>
         </Box>
       );
     case 'assistant':

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import { runAgent } from '../../src/agent/loop.js';
+import { estimateTokens } from '../../src/agent/compaction/compact.js';
 import { GoalMode } from '../../src/agent/goal/mode.js';
 import { stored, type StoredMessage } from '../../src/agent/message.js';
 import { collect, makeFakeProvider, textBlock, toolUseBlock } from '../helpers/fakeProvider.js';
@@ -109,6 +110,83 @@ describe('runAgent', () => {
     expect(events.some((e) => e.type === 'notice')).toBe(true);
     expect(events.at(-1)!.type).toBe('turn_done');
     expect(streamCalls()).toBe(3);
+  });
+
+  it('循环内压缩后紧跟 usage 事件：状态栏立即回落到压缩后估算，不等下一回合', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})] }, // 第1轮 tool_use
+      { textChunks: [], finalContent: [textBlock('早期摘要')] }, // fullCompact 摘要调用
+      { textChunks: ['完成'], finalContent: [textBlock('完成')] }, // 第2轮 end_turn
+    ]);
+    const big2: StoredMessage[] = Array.from({ length: 8 }, (_, i) =>
+      i % 2 === 0
+        ? sm({ role: 'user', content: `历史消息内容${'x'.repeat(100)}` })
+        : sm({ role: 'assistant', content: [textBlock(`回复${'y'.repeat(100)}`)] }, 'assistant'),
+    );
+    const beforeEstimate = estimateTokens(big2);
+    const events = await collect(
+      runAgent({
+        ...baseOpts(provider, big2),
+        compaction: { maxContextSize: 200, triggerRatio: 0.85, reservedTokens: 10 },
+      }),
+    );
+    const noticeIdx = events.findIndex((e) => e.type === 'notice');
+    expect(noticeIdx).toBeGreaterThanOrEqual(0);
+    // notice 之后紧跟一条 usage，值已回落（KEEP_RECENT 保留近 6 条，只有最老 2 条被摘要，降幅有限但必然 < 压缩前）
+    const usageAfter = events.slice(noticeIdx + 1).find((e) => e.type === 'usage') as
+      | { type: 'usage'; totalTokens: number }
+      | undefined;
+    expect(usageAfter).toBeDefined();
+    expect(usageAfter!.totalTokens).toBeGreaterThan(0);
+    expect(usageAfter!.totalTokens).toBeLessThan(beforeEstimate);
+  });
+
+  it('真实 usage 事件带 measuredLength = 当轮消息全长（供 UI 叠加未测量尾部）', async () => {
+    const { provider } = makeFakeProvider([
+      {
+        textChunks: ['好'],
+        finalContent: [textBlock('好')],
+        usage: { input_tokens: 100, output_tokens: 20 } as Anthropic.Usage,
+      },
+    ]);
+    const messages: StoredMessage[] = [sm({ role: 'user', content: 'hi' })];
+    const events = await collect(runAgent(baseOpts(provider, messages)));
+
+    const usage = events.find((e) => e.type === 'usage') as
+      | { type: 'usage'; totalTokens: number; measuredLength?: number }
+      | undefined;
+    expect(usage).toBeDefined();
+    expect(usage!.totalTokens).toBe(120);
+    // 真实 usage 覆盖当轮完整历史（user + assistant），游标为全长 → UI 侧尾部为空、不叠加估算
+    expect(usage!.measuredLength).toBe(messages.length);
+    expect(messages).toHaveLength(2);
+  });
+
+  it('压缩回落的估算 usage 带 measuredLength = 压缩后全长（尾部为空，不重复叠加）', async () => {
+    const { provider } = makeFakeProvider([
+      { textChunks: [], finalContent: [toolUseBlock('c1', 'nonexistent_tool', {})] },
+      { textChunks: [], finalContent: [textBlock('早期摘要')] }, // fullCompact 摘要调用
+      { textChunks: ['完成'], finalContent: [textBlock('完成')] },
+    ]);
+    const msgs: StoredMessage[] = Array.from({ length: 8 }, (_, i) =>
+      i % 2 === 0
+        ? sm({ role: 'user', content: `历史消息内容${'x'.repeat(100)}` })
+        : sm({ role: 'assistant', content: [textBlock(`回复${'y'.repeat(100)}`)] }, 'assistant'),
+    );
+    const events = await collect(
+      runAgent({
+        ...baseOpts(provider, msgs),
+        compaction: { maxContextSize: 200, triggerRatio: 0.85, reservedTokens: 10 },
+      }),
+    );
+    const noticeIdx = events.findIndex((e) => e.type === 'notice');
+    const usageAfter = events.slice(noticeIdx + 1).find((e) => e.type === 'usage') as
+      | { type: 'usage'; totalTokens: number; measuredLength?: number }
+      | undefined;
+    expect(usageAfter).toBeDefined();
+    // 该值是压缩后全量估算：游标必须为全长，否则 UI 会把全部消息再当尾部估算一遍（翻倍）
+    expect(usageAfter!.measuredLength).toBeGreaterThan(0);
+    expect(usageAfter!.totalTokens).toBe(estimateTokens(msgs.slice(0, usageAfter!.measuredLength)));
   });
 
   it('上下文溢出：压缩历史后重试本回合完成', async () => {

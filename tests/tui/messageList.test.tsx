@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { Box, Static, Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MessageItem, MessageList, ThinkingPreview, countSettledItems } from '../../src/tui/MessageList.js';
+import { MessageItem, MessageList, ThinkingPreview, appendStreamText, countSettledItems } from '../../src/tui/MessageList.js';
 import type { DisplayItem } from '../../src/tui/types.js';
 import type { WorkflowPanelState } from '../../src/tui/WorkflowPanel.js';
 
@@ -76,6 +76,54 @@ describe('countSettledItems 定稿判定', () => {
   it('busy 时取 streaming assistant 与 running 工具中更靠前的下标', () => {
     const items = [user('u1'), tool('t1', 'running'), assistant('a1')];
     expect(countSettledItems(items, true)).toBe(1);
+  });
+
+  it('busy 时 assistant 后只跟 UI 侧提示（非 boundary note）：仍视为未闭合，留动态区', () => {
+    // 队列回执等 UI 提示不构成消息边界，流式正文会越过它续接（见 appendStreamText）
+    const items = [user('u1'), assistant('流式中'), note('已加入发送队列')];
+    expect(countSettledItems(items, true)).toBe(1);
+  });
+
+  it('busy 时 boundary note（retry/notice/aborted）闭合前面的 assistant', () => {
+    const items = [user('u1'), assistant('失败的残文'), { kind: 'note' as const, text: '重试中', boundary: true }];
+    // assistant 已终结可定稿；boundary note 是静态内容一并定稿
+    expect(countSettledItems(items, true)).toBe(3);
+  });
+
+  it('busy 时 running 工具后的 UI 提示透明：仍按 running 工具截断', () => {
+    const items = [user('u1'), assistant('a1'), tool('t1', 'running'), note('已加入发送队列')];
+    expect(countSettledItems(items, true)).toBe(2);
+  });
+});
+
+describe('appendStreamText 流式正文追加', () => {
+  it('末尾是 assistant：直接续写', () => {
+    const out = appendStreamText([user('u1'), assistant('前半')], '后半');
+    expect(out).toEqual([user('u1'), assistant('前半后半')]);
+  });
+
+  it('末尾是 UI 侧提示：越过提示续接上一条 assistant，提示位置不动', () => {
+    const out = appendStreamText([assistant('前半'), note('已加入发送队列'), note('另一条提示')], '后半');
+    expect(out).toEqual([assistant('前半后半'), note('已加入发送队列'), note('另一条提示')]);
+  });
+
+  it('末尾是 boundary note：另开新 assistant 条目（重试/通知后的正文属新消息）', () => {
+    const out = appendStreamText([assistant('残文'), { kind: 'note' as const, text: '重试中', boundary: true }], '新正文');
+    expect(out).toEqual([
+      assistant('残文'),
+      { kind: 'note' as const, text: '重试中', boundary: true },
+      assistant('新正文'),
+    ]);
+  });
+
+  it('UI 提示前是工具而非 assistant：另开新条目', () => {
+    const t1 = tool('t1', 'ok');
+    const out = appendStreamText([assistant('a1'), t1, note('提示')], '新消息');
+    expect(out).toEqual([assistant('a1'), t1, note('提示'), assistant('新消息')]);
+  });
+
+  it('空列表：新建 assistant 条目', () => {
+    expect(appendStreamText([], '开头')).toEqual([assistant('开头')]);
   });
 });
 
@@ -258,5 +306,25 @@ describe('ThinkingPreview 流式预览', () => {
     for (const l of ['HH', 'II', 'JJ']) expect(out).toContain(l);
     expect(out).not.toContain('GG');
     expect(out).not.toContain('AA');
+  });
+});
+
+
+describe('MessageItem user 条目排版（防 squash 回归）', () => {
+  it('长行折行：「› 」空格保留，续行保持 2 列悬挂缩进', () => {
+    // 两个 Text 兄弟会被 Ink squash 成一个文本块统一折行，前缀尾空格落在断行点时被吞、
+    // 续行只剩 1 空格；包 Box 后正文在自己的盒子里折行，缩进稳定
+    const { lastFrame } = render(<MessageItem item={user('输'.repeat(120))} expanded={false} />);
+    const lines = (lastFrame() ?? '').split('\n').filter((l) => l.includes('输'));
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    expect(lines[0]).toMatch(/^› 输/);
+    expect(lines[1]).toMatch(/^ {2}输/);
+  });
+
+  it('多行文本：续行保持 2 列悬挂缩进', () => {
+    const { lastFrame } = render(<MessageItem item={user('第一行内容\n第二行内容')} expanded={false} />);
+    const out = lastFrame() ?? '';
+    expect(out).toContain('› 第一行内容');
+    expect(out).toContain('  第二行内容');
   });
 });

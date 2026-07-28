@@ -4,6 +4,11 @@ import { t } from '../i18n.js';
 
 const MAX_VISIBLE = 5;
 
+/** 回合收尾判定：清单非空且全部完成 → 清空，面板不常驻；有未完成项则跨回合保留。 */
+export function allTodosDone(todos: readonly TodoItem[]): boolean {
+  return todos.length > 0 && todos.every((td) => td.status === 'done');
+}
+
 /** 精简常驻 TODO 面板：显示当前任务清单，最多 5 条 + +N more。 */
 export function TodoPanel({ todos }: { todos: readonly TodoItem[] }): React.ReactElement | null {
   if (todos.length === 0) return null;

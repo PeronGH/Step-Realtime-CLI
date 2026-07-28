@@ -10,6 +10,7 @@ import {
   moveHome,
   moveLeft,
   moveRight,
+  normalizePastedText,
   resolveEditAction,
   wordLeft,
   wordRight,
@@ -163,5 +164,27 @@ describe('promptEdit 按键 → 编辑动作映射', () => {
     expect(resolveEditAction('b', { meta: false })).toBeNull();
     expect(resolveEditAction('x', { ctrl: true })).toBeNull(); // 未定义的 Ctrl 组合
     expect(resolveEditAction('', {})).toBeNull();
+  });
+});
+
+
+describe('normalizePastedText 粘贴换行归一', () => {
+  it('CRLF 与裸 CR 统一为 LF', () => {
+    expect(normalizePastedText('abc\r\ndef')).toBe('abc\ndef');
+    expect(normalizePastedText('abc\rdef')).toBe('abc\ndef');
+    expect(normalizePastedText('a\r\nb\rc\nd')).toBe('a\nb\nc\nd');
+  });
+
+  it('无 CR 时原样返回（含纯 LF 与无换行）', () => {
+    expect(normalizePastedText('abc\ndef')).toBe('abc\ndef');
+    expect(normalizePastedText('abc')).toBe('abc');
+    expect(normalizePastedText('')).toBe('');
+  });
+
+  it('归一后经 insertText 插入的值不含 \r', () => {
+    const next = insertText(s('xy', 1), normalizePastedText('a\r\nb'));
+    expect(next.text).toBe('xa\nby');
+    expect(next.text).not.toContain('\r');
+    expect(next.cursor).toBe(4);
   });
 });

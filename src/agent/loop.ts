@@ -219,14 +219,19 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'max_tokens': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage) };
+          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
         }
-        // 截断提示（终止 + 明确提示，不自动续写）：带上当前上限便于用户调整
+        // 截断提示（终止 + 明确提示，不自动续写）：带上当前上限便于用户调整。
+        // thinkingExhausted：思考吃满预算、正文零输出——给「调 max_tokens / 降档」的确定性提示，
+        // 而非普通截断的「回复继续」（继续也没用，预算组合不变必然复现）。
         const limit = provider.maxTokens;
         yield {
           type: 'notice',
-          message:
-            limit !== undefined
+          message: outcome.thinkingExhausted
+            ? limit !== undefined
+              ? t('loop.maxTokens.thinkingExhaustedWithLimit', { limit })
+              : t('loop.maxTokens.thinkingExhausted')
+            : limit !== undefined
               ? t('loop.maxTokens.truncatedWithLimit', { limit })
               : t('loop.maxTokens.truncated'),
         };
@@ -235,7 +240,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'end_turn': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage) };
+          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
         }
         if (await resolveShouldContinue(hooks)) {
           continue; // goal 模式等：继续下一回合
@@ -245,7 +250,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
       }
       case 'tool_use': {
         if (outcome.usage !== undefined) {
-          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage) };
+          yield { type: 'usage', totalTokens: usageTotalTokens(outcome.usage), measuredLength: messages.length };
         }
         // 循环内压缩：用真实 usage（+ 本回合新增消息的尾部估算）判断，超阈值先 micro 再 full
         if (compaction !== undefined) {

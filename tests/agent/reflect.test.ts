@@ -42,16 +42,17 @@ function capturingProvider(texts: string[]): {
 }
 
 describe('segmentMessages', () => {
-  it('按 token 预算切段：每条约 10 token', () => {
+  it('按 token 预算切段：每条约 8 token', () => {
     const msgs = [msg('user', 'x'.repeat(30)), msg('assistant', 'y'.repeat(30)), msg('user', 'z'.repeat(30))];
-    // 预算 25：seg1=[m1,m2]（10+10<=25），m3 触发新段
-    expect(segmentMessages(msgs, 25)).toHaveLength(2);
-    // 预算 10：每条自成一段
+    // 分桶估算下每条 30 个 ASCII 字符 = ceil(30/4) = 8 token
+    // 预算 25：8+8+8=24 <= 25，三条同段
+    expect(segmentMessages(msgs, 25)).toHaveLength(1);
+    // 预算 10：8 装得下，+8=16 超预算 → 每条自成一段
     expect(segmentMessages(msgs, 10)).toHaveLength(3);
   });
 
   it('单条超预算仍自成一段，不拆消息', () => {
-    const big = msg('user', 'x'.repeat(300)); // 100 token
+    const big = msg('user', 'x'.repeat(300)); // 75 token（300 ASCII / 4）
     expect(segmentMessages([big], 10)).toHaveLength(1);
     expect(segmentMessages([big], 10)[0]).toHaveLength(1);
   });

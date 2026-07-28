@@ -9,7 +9,16 @@ export type AgentEvent =
   | { type: 'aborted' }
   | { type: 'turn_done' }
   | { type: 'notice'; message: string }
-  | { type: 'usage'; totalTokens: number }
+  /**
+   * 上下文用量。totalTokens 为该事件覆盖范围的 token 总量。
+   * measuredLength：此 totalTokens 已测量/覆盖的 messages 前缀长度——真实 usage 覆盖当轮完整 messages
+   * （= messages.length），供 UI 对「此后新 append、尚未经历 API 往返」的尾部消息做字符估算叠加，
+   * 使状态栏在两次往返之间也能反映新增内容。压缩后的纯估算回落传压缩后全长（= messages.length）：
+   * totalTokens 已是全量估算、覆盖当前全部消息，游标设为全长使尾部为空、不重复叠加。
+   * measuredLength=0 表示无已测量前缀（如 resume 尚未往返），UI 对全部消息做估算。
+   * 省略时 UI 退化为「只显示 totalTokens、不叠加尾部」的旧行为。
+   */
+  | { type: 'usage'; totalTokens: number; measuredLength?: number }
   /** cause：原始错误对象（内部元数据，UI 不消费），供子 agent 运行器识别 429 做重排队判定。 */
   | { type: 'error'; message: string; cause?: unknown };
 

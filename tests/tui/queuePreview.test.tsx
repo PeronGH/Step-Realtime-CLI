@@ -42,6 +42,11 @@ describe('QueuePreview 面板', () => {
     expect(out).toContain('还有 2 条');
   });
 
+  it('底部显示 ↑ 取回末条编辑的可发现性提示', () => {
+    const { lastFrame } = render(React.createElement(QueuePreview, { queue: ['写测试'] }));
+    expect(lastFrame() ?? '').toContain('↑ 取回末条编辑');
+  });
+
   it('多行条目预览截断到两行加省略号', () => {
     const { lastFrame } = render(
       React.createElement(QueuePreview, { queue: ['第一行\n第二行\n第三行'] }),

@@ -65,6 +65,15 @@ describe('computeLiveBudget 动态区高度预算', () => {
     expect(b.liveMaxRows).toBe(1);
   });
 
+  it('WorkingStatus（workingRows）计入固定 chrome，不参与降级', () => {
+    // base 固定 6（status2+prompt4）+ workingRows 3 = 9；queue/todo 可降级项被砍
+    const b = computeLiveBudget(10, { ...base, workingRows: 3, queueRows: 5, todoRows: 7 });
+    expect(b.showQueue).toBe(false);
+    expect(b.showTodos).toBe(false);
+    expect(b.chromeRows).toBe(9);
+    expect(b.liveMaxRows).toBe(1);
+  });
+
   it('固定 chrome 超限：live 保底 1 行（不为 0/负数），degraded 标记供调试日志暴露', () => {
     const b = computeLiveBudget(6, base); // chrome 6 ≥ rows
     expect(b.liveMaxRows).toBe(1);
@@ -89,11 +98,27 @@ describe('displayWidth 终端显示宽度', () => {
 
 describe('matchSlashCommands 斜杠命令匹配', () => {
   it('前缀匹配命令名与别名；含空格或非 / 开头不匹配', () => {
+    // /mo 仅前缀命中 model（permission 的 o 在位置 8，超出跨度限制）
     expect(matchSlashCommands('/mo').map((c) => c.name)).toEqual(['model']);
     expect(matchSlashCommands('/q').map((c) => c.name)).toEqual(['exit']); // quit 别名
     expect(matchSlashCommands('/model x')).toEqual([]);
     expect(matchSlashCommands('hello')).toEqual([]);
     expect(matchSlashCommands('/zzz')).toEqual([]);
+  });
+  it('短查询（≤3 字符）降级到子序列匹配，前缀命中优先于子序列命中', () => {
+    // cp → compact（子序列：c→p）、mcp（子序列：c→p），两条子序列命中按注册序
+    expect(matchSlashCommands('/cp').map((c) => c.name)).toEqual(['compact', 'mcp']);
+    // se → resume（子序列匹配 sessions 别名：s→e）
+    expect(matchSlashCommands('/se').map((c) => c.name)).toEqual(['resume']);
+    // re → reflect（前缀）、resume（前缀），provider 的 e 在位置 6 超出跨度限制
+    expect(matchSlashCommands('/re').map((c) => c.name)).toEqual(['reflect', 'resume']);
+    // pl → plan（前缀）、plugin（前缀），两个都前缀命中按注册序
+    expect(matchSlashCommands('/pl').map((c) => c.name)).toEqual(['plan', 'plugin']);
+  });
+  it('≥4 字符不做子串降级，避免误命中', () => {
+    // sess → resume（仅 sessions 别名前缀匹配；compact 含 ss 但 4 字符不降级）
+    expect(matchSlashCommands('/sess').map((c) => c.name)).toEqual(['resume']);
+    expect(matchSlashCommands('/comp').map((c) => c.name)).toEqual(['compact']);
   });
 });
 
@@ -102,8 +127,8 @@ describe('computePromptRows 输入区实测行数', () => {
     expect(computePromptRows('', { busy: false, columns: 80 })).toBe(3);
   });
 
-  it('busy 加 tip 行；空闲 primed/exitPrimed 各加提示行', () => {
-    expect(computePromptRows('', { busy: true, columns: 80 })).toBe(4);
+  it('空闲 primed/exitPrimed 各加提示行；busy 不再加 tip 行（移到独立 WorkingStatus）', () => {
+    expect(computePromptRows('', { busy: true, columns: 80 })).toBe(3);
     expect(computePromptRows('', { busy: false, primed: true, columns: 80 })).toBe(4);
     expect(computePromptRows('', { busy: false, exitPrimed: true, columns: 80 })).toBe(4);
   });
@@ -113,8 +138,8 @@ describe('computePromptRows 输入区实测行数', () => {
     expect(computePromptRows('/', { busy: false, columns: 80 })).toBe(12);
     // /mo 匹配 1 条 → 2 + 1 = 3 行菜单 + 输入框 3 = 6
     expect(computePromptRows('/mo', { busy: false, columns: 80 })).toBe(6);
-    // busy 期间敲 / 也不漏算：12 + tip 1 = 13
-    expect(computePromptRows('/', { busy: true, columns: 80 })).toBe(13);
+    // busy 期间敲 / 也不漏算：12（busy 不加 tip 行，tip 归 WorkingStatus）
+    expect(computePromptRows('/', { busy: true, columns: 80 })).toBe(12);
   });
 
   it('长输入按终端宽度折行计入（含 CJK 宽字符）', () => {
@@ -124,5 +149,14 @@ describe('computePromptRows 输入区实测行数', () => {
     expect(computePromptRows('你'.repeat(38), { busy: false, columns: 80 })).toBe(4);
     // 窄终端：40 列 → 可用 34，40 个 ASCII → 2 行
     expect(computePromptRows('a'.repeat(40), { busy: false, columns: 40 })).toBe(4);
+  });
+
+  it('粘贴带入的多行值按行数计入（逐段折行求和，不把 \n 当普通字符）', () => {
+    // 两行短文本 → 2 行内容 + 边框 2 = 4
+    expect(computePromptRows('abc\ndef', { busy: false, columns: 80 })).toBe(4);
+    // 三行，末行超宽折 2 行 → 4 行内容 + 边框 2 = 6
+    expect(computePromptRows(`a\nb\n${'c'.repeat(75)}`, { busy: false, columns: 80 })).toBe(6);
+    // 空行也占 1 行
+    expect(computePromptRows('a\n\nb', { busy: false, columns: 80 })).toBe(5);
   });
 });

@@ -7,8 +7,8 @@ import { t } from '../i18n.js';
 function summarizeInput(input: unknown): string {
   if (input === null || typeof input !== 'object') return '';
   const obj = input as Record<string, unknown>;
-  // 优先展示最能代表操作对象的字段
-  for (const key of ['path', 'pattern', 'command']) {
+  // 优先展示最能代表操作对象的字段（skill 工具的操作对象是技能名，否则卡片只剩工具名、看不出激活了哪个）
+  for (const key of ['path', 'pattern', 'command', 'skill']) {
     const v = obj[key];
     if (typeof v === 'string' && v.length > 0) {
       return v.length > 80 ? `${v.slice(0, 80)}…` : v;
@@ -30,6 +30,20 @@ function statusMark(status: 'running' | 'ok' | 'error'): { symbol: string; color
 
 const COLLAPSED_ERROR_LINES = 4;
 const EXPANDED_MAX_LINES = 200;
+
+/**
+ * 折叠态是否真的藏了内容（Ctrl+O 展开预览层的条目筛选口径，与 ResultBody 折叠分支一一对应）：
+ * 成功且非 diff 的输出整段折叠成一行提示 → 可展开；错误输出超过预览行数 → 可展开；
+ * diff 结果与短错误输出折叠态已完整显示 → 不算；running / 无结果体不算。
+ */
+export function hasCollapsedBody(item: Extract<DisplayItem, { kind: 'tool' }>): boolean {
+  if (item.status === 'running') return false;
+  const result = item.result;
+  if (result === undefined || result === '') return false;
+  const lines = result.split('\n');
+  if (item.status === 'error') return lines.length > COLLAPSED_ERROR_LINES;
+  return !/^[+-]\d+ /.test(lines[0]!);
+}
 
 /** diff 数据行：4 位右对齐行号 + 空格 + 标记（+/-/空格）。用于按行上色。 */
 const DIFF_ROW_RE = /^\s*\d+ ([+\-]) /;
@@ -113,7 +127,8 @@ export function ToolCall({
       <Text>
         <Text color={mark.color}>{mark.symbol} </Text>
         <Text color="cyan">{item.name}</Text>
-        {arg !== '' ? <Text color="gray">{`  ${arg}`}</Text> : null}
+        {/* skill 名用黄色而非常规参数灰：技能激活会改变后续行为，比读写路径更需要一眼认出激活了哪个 */}
+        {arg !== '' ? <Text color={item.name === 'skill' ? 'yellow' : 'gray'}>{`  ${arg}`}</Text> : null}
         {elapsedSec !== null ? <Text color="gray">{t('toolCall.elapsed', { s: elapsedSec })}</Text> : null}
       </Text>
       {hasBody ? <ResultBody lines={lines} isError={item.status === 'error'} expanded={expanded} /> : null}

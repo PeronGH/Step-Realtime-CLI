@@ -27,6 +27,8 @@ export interface ChromeBlocks {
   imageRows?: number;
   /** 思考流式预览行数（0 = 不可见；含标题行）。 */
   thinkingRows?: number;
+  /** 忙碌态状态行 WorkingStatus 行数（0 = 不可见；busy 关键面板，固定不降级）。 */
+  workingRows?: number;
 }
 
 export interface LiveBudget {
@@ -50,11 +52,12 @@ export function computeLiveBudget(termRows: number | undefined, blocks: ChromeBl
   const agentRows = blocks.agentRows ?? 0;
   const queueRows = blocks.queueRows ?? 0;
   const imageRows = blocks.imageRows ?? 0;
+  const workingRows = blocks.workingRows ?? 0;
   let thinkingRows = blocks.thinkingRows ?? 0;
   let showTodos = todoRows > 0;
   let showQueue = queueRows > 0;
   let degraded = false;
-  const fixedRows = blocks.statusRows + blocks.promptRows + agentRows + imageRows;
+  const fixedRows = blocks.statusRows + blocks.promptRows + agentRows + imageRows + workingRows;
   let chromeRows = fixedRows + todoRows + queueRows + thinkingRows;
 
   if (termRows !== undefined) {

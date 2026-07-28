@@ -39,8 +39,8 @@ describe('chrome 面板长行截断（wrap=truncate）', () => {
     const { lastFrame } = render(<QueuePreview queue={[entry]} />);
     const out = lastFrame() ?? '';
     const lines = frameLines(out);
-    // 标题 1 + 条目 1 = 2 行
-    expect(lines).toHaveLength(2);
+    // 标题 1 + 条目 1 + ↑ 取回提示 1 = 3 行
+    expect(lines).toHaveLength(3);
     expect(out).not.toContain('a'.repeat(101));
   });
 
@@ -49,8 +49,8 @@ describe('chrome 面板长行截断（wrap=truncate）', () => {
     const { lastFrame } = render(<QueuePreview queue={[entry]} />);
     const out = lastFrame() ?? '';
     const lines = frameLines(out);
-    // 标题 1 + 条目 2 行（第三行被 previewEntry 折叠为省略号）
-    expect(lines).toHaveLength(3);
+    // 标题 1 + 条目 2 行（第三行被 previewEntry 折叠为省略号）+ ↑ 取回提示 1
+    expect(lines).toHaveLength(4);
     expect(out).toContain('…');
     expect(out).not.toContain('b'.repeat(101));
   });

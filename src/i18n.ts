@@ -46,11 +46,13 @@ const zh = {
   'question.multiHint': '  （多选：空格勾选，Enter 提交）',
   'question.otherPlaceholder': '输入自定义答案，回车提交',
   'question.hint': '↑↓ 移动 · 数字键直选 · Enter 确认 · Esc 取消',
+  'question.hintMulti': '↑↓ 移动 · ←→ 切换题 · 数字键直选 · Enter 确认 · Esc 取消',
 
   // --- 底部输入框（PromptInput）---
   'input.placeholder.busy': '思考中…输入将加入发送队列',
   'input.placeholder.idle': '输入指令，回车发送',
   'input.tipPrefix': '  · 提示：{tip}',
+  'workingStatus.tokens': '↓ {count} tokens',
   'input.backtrackPrimed': '  · 再按一次 Esc 取回上一条消息编辑',
   'input.exitPrimed': '  · 再按一次 Ctrl+C 退出',
 
@@ -63,6 +65,7 @@ const zh = {
   'toolCall.tooLong': '… 输出过长，仅显示前 {shown}/{total} 行',
   'toolCall.moreLines': '… 还有 {count} 行 · Ctrl+O 展开',
   'toolCall.collapsed': '{count} 行输出 · Ctrl+O 展开',
+  'expandReview.header': '── 展开预览：最近 {count} 条工具输出（再按 Ctrl+O 收起）──',
 
   // --- 动态区视口（LiveViewport，滚动跳顶修复）---
   'liveViewport.hiddenLines': '↑ 已隐藏 {count} 行早期输出',
@@ -102,6 +105,10 @@ const zh = {
   'sessionPicker.searchPlaceholder': '输入过滤标题或首条消息…',
   'sessionPicker.empty': '无匹配的会话（Esc 开新会话）',
   'sessionPicker.pageInfo': '{start}-{end} / 共 {total} 个',
+  'sessionPicker.current': '· 当前',
+  'sessionPicker.deleteHint': '↑/↓ 选择 · 输入过滤 · Enter 恢复 · Del/Ctrl+D 删除 · Esc 新会话',
+  'sessionPicker.deleteConfirm': '删除会话 {title}？此操作不可恢复 [y/N]',
+  'sessionPicker.cannotDeleteCurrent': '无法删除当前正在使用的会话',
 
   // --- 模型选择器（ModelPicker）---
   'modelPicker.title': '选择模型',
@@ -122,6 +129,7 @@ const zh = {
   'app.think.invalid': '未知思考深度档位：{name}（可用：{list}，或 off 关闭）',
   'app.think.switched': '思考深度已切换为：{level}（{detail}，下一轮请求生效）',
   'app.think.cacheWarning': '切换思考深度会使已有 prompt cache 失效，/new 开新会话可避免额外 token 消耗',
+  'app.think.budgetWarning': '⚠ 该档位思考预算 {budget} 与当前 max_tokens {maxTokens} 余量不足，正文可能被挤空导致空响应。建议在 config.toml 调大 max_tokens，或用 /think 降档。',
   'app.think.status': '当前生效：{current} · 配置默认：{defaultLevel}\n可用档位：\n{lines}',
   'app.think.levelLine': '  {name} = {budget}',
   'app.think.followDefault': '跟随配置默认',
@@ -165,6 +173,7 @@ const zh = {
   'app.queue.restored': '已把发送队列的内容合并回输入框，可编辑后再发送。',
   'app.queue.previewTitle': '📤 发送队列 {count} 条 · 回合结束后按序发送 · Esc 中断后立即发送',
   'app.queue.previewMore': '  … 还有 {count} 条',
+  'app.queue.recallHint': '  ↑ 取回末条编辑',
   'app.aborted.resumeQueue': '已中断（Esc）。继续发送队列中的 {count} 条消息。',
   'app.aborted.plain': '已中断（Esc）。会话历史已保留，可继续输入。',
   'app.error.exportHint': '如需排查，可运行 /export-debug-zip 导出调试包发我们（请勿公开分享）',
@@ -257,10 +266,6 @@ const zh = {
   // --- App /sessions /resume（main.tsx sessions 子命令复用 app.sessions.none / app.sessions.untitled / app.resume.notFound）---
   'app.sessions.none': '本工作目录暂无历史会话。',
   'app.sessions.untitled': '(无标题)',
-  'app.sessions.line': '{mark}{id}  {title}  {count} 条  {updated}',
-  'app.sessions.list': '历史会话（* 为当前）：\n{lines}\n可用 /resume <id> 切换到指定会话。',
-  'app.resume.list': '历史会话（* 为当前）：\n{lines}\n输入 /resume <id> 切换。',
-  'app.resume.busy': '会话进行中，无法切换。等当前回合结束再试。',
   'app.resume.notFound': '未找到会话 {id}',
   'app.resume.switched': '已切换到会话 {id}（{turns} 轮 · {count} 条历史）。',
   'app.unknownCommand': '未知命令：{command}（输入 /help 查看可用命令）',
@@ -349,6 +354,8 @@ const zh = {
   'loop.overflow.retried': '上下文溢出，已压缩历史后重试本回合。',
   'loop.maxTokens.truncated': '模型输出达到 max_tokens 上限被截断，截断处的工具调用未执行。可回复「继续」让我接着输出，或在 config.toml 调高 max_tokens。',
   'loop.maxTokens.truncatedWithLimit': '模型输出达到 max_tokens 上限（{limit}）被截断，截断处的工具调用未执行。可回复「继续」让我接着输出，或在 config.toml 调高 max_tokens。',
+  'loop.maxTokens.thinkingExhausted': '思考消耗了全部输出预算，正文没有空间生成。请在 config.toml 调大 max_tokens，或用 /think 降低思考档位。',
+  'loop.maxTokens.thinkingExhaustedWithLimit': '思考消耗了全部输出预算（max_tokens={limit}），正文没有空间生成。请在 config.toml 调大 max_tokens，或用 /think 降低思考档位。',
   'loop.autoCompacted': '上下文接近上限，已自动压缩历史。',
   'loop.maxIterations': '已达最大往返轮数（{max}），中止本次交互。',
   'turn.retry': '请求失败，{delay}ms 后重试（第 {attempt}/{max} 次）',
@@ -398,10 +405,12 @@ const en: Record<keyof typeof zh, string> = {
   'question.multiHint': '  (multi-select: Space to toggle, Enter to submit)',
   'question.otherPlaceholder': 'Type a custom answer, Enter to submit',
   'question.hint': '↑↓ move · number keys select · Enter confirm · Esc cancel',
+  'question.hintMulti': '↑↓ move · ←→ switch question · number keys select · Enter confirm · Esc cancel',
 
   'input.placeholder.busy': 'Thinking… input will join the send queue',
   'input.placeholder.idle': 'Type a command, Enter to send',
   'input.tipPrefix': '  · Tip: {tip}',
+  'workingStatus.tokens': '↓ {count} tokens',
   'input.backtrackPrimed': '  · Press Esc again to edit your previous message',
   'input.exitPrimed': '  · Press Ctrl+C again to exit',
 
@@ -412,6 +421,7 @@ const en: Record<keyof typeof zh, string> = {
   'toolCall.tooLong': '… output too long, showing first {shown}/{total} lines',
   'toolCall.moreLines': '… {count} more lines · Ctrl+O to expand',
   'toolCall.collapsed': '{count} lines of output · Ctrl+O to expand',
+  'expandReview.header': '── Expanded preview: last {count} tool outputs (Ctrl+O to collapse) ──',
 
   'liveViewport.hiddenLines': '↑ {count} earlier lines hidden',
 
@@ -446,6 +456,10 @@ const en: Record<keyof typeof zh, string> = {
   'sessionPicker.searchPlaceholder': 'type to filter title or first message…',
   'sessionPicker.empty': 'No matching sessions (Esc for new session)',
   'sessionPicker.pageInfo': '{start}-{end} of {total}',
+  'sessionPicker.current': '· current',
+  'sessionPicker.deleteHint': '↑/↓ select · type to filter · Enter resume · Del/Ctrl+D delete · Esc new session',
+  'sessionPicker.deleteConfirm': 'Delete session {title}? This cannot be undone [y/N]',
+  'sessionPicker.cannotDeleteCurrent': 'Cannot delete the session currently in use',
 
   'modelPicker.title': 'Select a model',
   'modelPicker.searchPrefix': 'Search: ',
@@ -465,6 +479,7 @@ const en: Record<keyof typeof zh, string> = {
   'app.think.invalid': 'Unknown thinking level: {name} (available: {list}, or off to disable)',
   'app.think.switched': 'Thinking level switched to: {level} ({detail}, takes effect next turn)',
   'app.think.cacheWarning': 'Switching thinking level invalidates the existing prompt cache; start a new session with /new to avoid extra token cost',
+  'app.think.budgetWarning': '⚠ This level\'s thinking budget {budget} leaves too little room against the current max_tokens {maxTokens}; the response may be squeezed out, causing an empty reply. Raise max_tokens in config.toml, or lower the level with /think.',
   'app.think.status': 'Active: {current} · Config default: {defaultLevel}\nAvailable levels:\n{lines}',
   'app.think.levelLine': '  {name} = {budget}',
   'app.think.followDefault': 'follow config default',
@@ -502,6 +517,7 @@ const en: Record<keyof typeof zh, string> = {
   'app.queue.restored': 'Queued messages merged back into the input box; edit before sending.',
   'app.queue.previewTitle': '📤 Send queue {count} · sent in order at end of turn · Esc interrupts and sends now',
   'app.queue.previewMore': '  … {count} more',
+  'app.queue.recallHint': '  ↑ recall last entry for editing',
   'app.aborted.resumeQueue': 'Aborted (Esc). Continuing with {count} queued messages.',
   'app.aborted.plain': 'Aborted (Esc). History kept; you can keep typing.',
   'app.error.exportHint': 'To troubleshoot, run /export-debug-zip and send us the bundle (do not share publicly)',
@@ -586,10 +602,6 @@ const en: Record<keyof typeof zh, string> = {
 
   'app.sessions.none': 'No past sessions in this working directory.',
   'app.sessions.untitled': '(untitled)',
-  'app.sessions.line': '{mark}{id}  {title}  {count} msgs  {updated}',
-  'app.sessions.list': 'Past sessions (* = current):\n{lines}\nUse /resume <id> to switch to a session.',
-  'app.resume.list': 'Past sessions (* = current):\n{lines}\nType /resume <id> to switch.',
-  'app.resume.busy': 'Session busy; cannot switch. Try again after the current turn.',
   'app.resume.notFound': 'Session {id} not found',
   'app.resume.switched': 'Switched to session {id} ({turns} turns · {count} messages).',
   'app.unknownCommand': 'Unknown command: {command} (type /help to see available commands)',
@@ -675,6 +687,8 @@ const en: Record<keyof typeof zh, string> = {
   'loop.overflow.retried': 'Context overflow; history compacted, retrying this turn.',
   'loop.maxTokens.truncated': 'Model output hit the max_tokens limit and was truncated; the truncated tool call was not executed. Reply "continue" to resume output, or raise max_tokens in config.toml.',
   'loop.maxTokens.truncatedWithLimit': 'Model output hit the max_tokens limit ({limit}) and was truncated; the truncated tool call was not executed. Reply "continue" to resume output, or raise max_tokens in config.toml.',
+  'loop.maxTokens.thinkingExhausted': 'Thinking consumed the entire output budget, leaving no room for the response. Raise max_tokens in config.toml, or lower the thinking level with /think.',
+  'loop.maxTokens.thinkingExhaustedWithLimit': 'Thinking consumed the entire output budget (max_tokens={limit}), leaving no room for the response. Raise max_tokens in config.toml, or lower the thinking level with /think.',
   'loop.autoCompacted': 'Context nearing the limit; history auto-compacted.',
   'loop.maxIterations': 'Reached the maximum number of turns ({max}); aborting this run.',
   'turn.retry': 'Request failed, retrying in {delay}ms (attempt {attempt}/{max})',

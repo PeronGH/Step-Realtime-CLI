@@ -43,6 +43,10 @@ export function QueuePreview({ queue }: { queue: string[] }): React.ReactElement
           {t('app.queue.previewMore', { count: rest })}
         </Text>
       ) : null}
+      {/* 可发现性提示：busy + 空输入时 ↑ 取回队尾进输入框编辑（发送从头部消费，编辑从尾部取回） */}
+      <Text color="gray" dimColor wrap="truncate">
+        {t('app.queue.recallHint')}
+      </Text>
     </Box>
   );
 }

@@ -25,7 +25,8 @@ import type { ChatProvider } from '../provider/types.js';
 import type { ToolContext } from '../tools/types.js';
 import type { TodoItem } from '../tools/types.js';
 import { clearDynamicTools } from '../tools/index.js';
-import { AgentGroup } from './AgentGroup.js';
+import { AgentGroup, formatAgentGroupSummary } from './AgentGroup.js';
+import { ExpandedReview } from './ExpandedReview.js';
 import { ApprovalPrompt, denyReason, estimateChromeRows as estimateApprovalRows, type ApprovalRequest } from './ApprovalPrompt.js';
 import { QuestionPrompt, estimateChromeRows as estimateQuestionRows } from './QuestionPrompt.js';
 import type { AskUserRequest, QuestionAnswers } from '../tools/askUser.js';
@@ -39,11 +40,13 @@ import type { McpManager } from '../mcp/manager.js';
 import { formatElapsed } from './elapsed.js';
 import { STATUS_BAR_ROWS } from './LiveViewport.js';
 import { computeLiveBudget, logRenderBudget, displayWidth, wrappedRows } from './liveBudget.js';
-import { MessageItem, MessageList, ThinkingPreview, THINKING_PREVIEW_LINES, countSettledItems } from './MessageList.js';
+import { MessageItem, MessageList, ThinkingPreview, THINKING_PREVIEW_LINES, appendStreamText, countSettledItems } from './MessageList.js';
 import { ModelPicker, type ModelPickerItem } from './ModelPicker.js';
+import { SessionPicker, relativeTime } from './SessionPicker.js';
 import { ThinkPicker, type ThinkPickerItem } from './ThinkPicker.js';
 import {
   parseThinkArgs,
+  thinkBudgetSafety,
   thinkLevelsOf,
   thinkStatusLabel,
   thinkStreamParam,
@@ -54,10 +57,11 @@ import { PromptInput, computePromptRows } from './PromptInput.js';
 import { QueuePreview } from './QueuePreview.js';
 import { computeBacktrack, truncateItemsAtLastUser } from './backtrack.js';
 import { StatusBar } from './StatusBar.js';
-import { TodoPanel } from './TodoPanel.js';
+import { TodoPanel, allTodosDone } from './TodoPanel.js';
+import { WorkingStatus } from './WorkingStatus.js';
 import { applyStepEvent, applySubagentEvent, parseWorkflowInput, parseWfSid } from './WorkflowPanel.js';
 import { WelcomeBox } from './WelcomeBox.js';
-import type { SessionData, SessionStore } from '../session/store.js';
+import type { SessionData, SessionMeta, SessionStore } from '../session/store.js';
 import { exportDebugBundle } from '../session/debugBundle.js';
 import { InputHistoryStore } from '../session/inputHistory.js';
 import type { DisplayItem } from './types.js';
@@ -163,6 +167,10 @@ export function App({
   });
   // /model 无参唤起的交互式模型选择器（替换输入区，对齐提问/审批弹层的挂载模式）。
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  // /resume 无参唤起的交互式会话选择器（同 ModelPicker 弹层挂载模式）。
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
+  // 会话选择器的候选快照：打开时从 store.list 快照一次（避免每帧读盘），删除后本地移除。
+  const [sessionPickerItems, setSessionPickerItems] = useState<SessionMeta[]>([]);
   // /think 无参唤起的交互式思考深度选择器（同 ModelPicker 弹层挂载模式）。
   const [thinkPickerOpen, setThinkPickerOpen] = useState(false);
   // 会话级思考深度覆盖：undefined = 跟随 config 默认；'off' = 本会话不发 thinking 字段；
@@ -240,8 +248,16 @@ export function App({
   const [subagents, setSubagents] = useState<import('./AgentGroup.js').SubagentProgress[]>([]);
   // 运行中的 workflow 工具调用 id 栈：onWorkflowStep 与 wf- 前缀子 agent 事件据此定位步骤面板。
   const activeWorkflowRef = useRef<string[]>([]);
-  // 真实 token 用量（provider usage 累计，用于状态栏 context 进度条）。
+  // 上下文占用 token（状态栏 context 进度条）：平时由 provider 真实 usage 事件驱动，
+  // 压缩（循环内自动 / 手动 /compact）后无真实 usage 可用，先用字符估算立即回落，下一条真实 usage 再校正。
   const [usedTokens, setUsedTokens] = useState(0);
+  // usedTokens 已测量/覆盖的 history 前缀长度。真实 usage 覆盖当轮完整 messages；
+  // 此后新 append、尚未经历 API 往返的尾部消息用字符估算叠加到显示值上（见 refreshContextUsage），
+  // 使状态栏在两次往返之间也能反映新增内容（贴长文本、脚本输出等）。下一条真实 usage 到达时校正、不叠加。
+  const measuredLenRef = useRef(0);
+  // 已测量前缀的 token 基准值：最近一条真实 usage（或压缩后全量估算）覆盖 [0, measuredLenRef) 的 token 数。
+  // 显示值 = baseTokensRef + 未测量尾部估算，二者由 refreshContextUsage 组装写入 usedTokens。
+  const baseTokensRef = useRef(0);
   // 流式期思考缓冲：ref 供 applyEvent 即时读写，state 驱动状态行预览重渲；
   // 思考完成后落成 kind:'thinking' 定稿条目并清空（参考 Codex：流式只进状态行，完成才落历史）。
   const thinkingRef = useRef('');
@@ -333,7 +349,9 @@ export function App({
   const changeMode = useCallback((m: PermissionMode) => {
     modeRef.current = m;
     setMode(m);
-  }, []);
+    // 权限模式是会话级状态：切换即落盘，恢复会话时读回（否则重开退回默认，实测问题）
+    persist();
+  }, [persist]);
 
   const setPlanModeBoth = useCallback((on: boolean) => {
     planModeRef.current = on;
@@ -342,6 +360,26 @@ export function App({
 
   const pushItem = useCallback((item: DisplayItem) => {
     setItems((prev) => [...prev, item]);
+  }, []);
+
+  // busy 上升沿：记本回合起始时间 + 清零本轮产出字符数（供 WorkingStatus 显示 elapsed/token）。
+  useEffect(() => {
+    if (busy) {
+      setTurnStartAt(Date.now());
+      turnOutputCharsRef.current = 0;
+      setTurnOutputChars(0);
+    }
+  }, [busy]);
+
+  // 候选队列取回：busy + 输入框为空时 ↑ pop 队尾一条进输入框编辑
+  //（发送从头部 shift 消费，编辑从尾部 pop 取回，两个方向不冲突）。
+  // 通知条目被取回即摘除系统标记——编辑后就是用户草稿，提交时记输入历史。
+  const recallQueued = useCallback((): string | undefined => {
+    const recalled = queue.current.pop();
+    if (recalled === undefined) return undefined;
+    notifyTextRef.current.delete(recalled);
+    setQueueLen(queue.current.length);
+    return recalled;
   }, []);
 
   // 同名 skill 冲突提示文本：哪个来源被采用、覆盖了谁（无冲突返回 null）
@@ -557,6 +595,14 @@ export function App({
     setInput(result.prefill);
   }, [cancelBacktrackPrimed, persist]);
 
+  // 重算状态栏 context 用量：已测量前缀基准（baseTokensRef）+ 未测量尾部字符估算。
+  // 真实 usage 到达后 measuredLenRef=全长、尾部为空 → 显示纯真实值（校正、不叠加）；
+  // resume / 新 append 未往返时前缀不覆盖尾部，用估算叠加，使状态栏立即反映新增内容。
+  const refreshContextUsage = useCallback(() => {
+    const tail = history.current.slice(measuredLenRef.current);
+    setUsedTokens(baseTokensRef.current + (tail.length > 0 ? estimateTokens(tail) : 0));
+  }, []);
+
   // 卸载时清掉 primed 定时器，避免泄漏。
   useEffect(() => () => {
     if (backtrackTimerRef.current !== null) clearTimeout(backtrackTimerRef.current);
@@ -611,6 +657,10 @@ export function App({
     }
     // 思考深度选择器打开时：全部按键交给 ThinkPicker 自身的 useInput 处理（↑↓/Enter/Esc），App 不插手
     if (thinkPickerOpen) {
+      return;
+    }
+    // 会话选择器打开时：全部按键交给 SessionPicker 自身的 useInput 处理（↑↓/过滤/Enter/删除/Esc），App 不插手
+    if (sessionPickerOpen) {
       return;
     }
     // 计划确认框优先（Ready to code?）
@@ -685,6 +735,9 @@ export function App({
     if (ev.type === 'thinking_delta') {
       thinkingRef.current += ev.text;
       setThinkingPreview(thinkingRef.current);
+      // 思考也消耗 output 预算，计入本轮产出估算（WorkingStatus 的「↓ N tokens」）
+      turnOutputCharsRef.current += ev.text.length;
+      setTurnOutputChars(turnOutputCharsRef.current);
       return;
     }
     // 任何非 thinking 事件到来 = 思考块已结束：落成定稿条目（暗色斜体块）
@@ -699,18 +752,18 @@ export function App({
     if (ev.type === 'tool_end' && ev.name === 'workflow') {
       activeWorkflowRef.current = activeWorkflowRef.current.filter((id) => id !== ev.id);
     }
+    // 本轮流式正文字符累加（WorkingStatus 用来估 output token）。thinking 在上方分支单独累加；
+    // tool_use 参数在下方 tool_start 分支累加——三类 output（正文/思考/工具调用）都计入，与服务端 output_tokens 口径趋同。
+    if (ev.type === 'text') {
+      turnOutputCharsRef.current += ev.text.length;
+      setTurnOutputChars(turnOutputCharsRef.current);
+    }
     setItems((prev) => {
       const next = [...prev];
       switch (ev.type) {
-        case 'text': {
-          const last = next[next.length - 1];
-          if (last !== undefined && last.kind === 'assistant') {
-            next[next.length - 1] = { ...last, text: last.text + ev.text };
-          } else {
-            next.push({ kind: 'assistant', text: ev.text });
-          }
-          break;
-        }
+        case 'text':
+          // 流式正文追加（越过 UI 侧提示续接，不把一条消息劈成两截）
+          return appendStreamText(prev, ev.text);
         case 'tool_start': {
           const item: Extract<DisplayItem, { kind: 'tool' }> = {
             kind: 'tool',
@@ -726,6 +779,10 @@ export function App({
             if (wf !== null) item.workflow = wf;
           }
           next.push(item);
+          // 工具调用的 JSON 参数也是模型 output 的一部分（服务端计入 output_tokens），
+          // 计入本轮产出估算，避免「调工具为主的回合」spinner token 数接近 0。
+          turnOutputCharsRef.current += JSON.stringify(ev.input ?? {}).length;
+          setTurnOutputChars(turnOutputCharsRef.current);
           break;
         }
         case 'tool_end':
@@ -740,21 +797,29 @@ export function App({
           if (ev.name === 'todo_list') setTodoTick((t) => t + 1);
           break;
         case 'retry':
-          next.push({ kind: 'note', text: ev.message });
+          // agent 流事件：构成消息边界（重试后正文另开条目，不得续接到失败尝试上）
+          next.push({ kind: 'note', text: ev.message, boundary: true });
           break;
         case 'notice':
-          next.push({ kind: 'note', text: ev.message });
+          // agent 流事件：构成消息边界（压缩/溢出等通知后的正文属于新一轮消息）
+          next.push({ kind: 'note', text: ev.message, boundary: true });
           break;
         case 'usage':
-          setUsedTokens(ev.totalTokens);
+          // 记录此真实/估算值覆盖的 history 前缀长度与基准 token：真实 usage 带 messages.length，
+          // 压缩估算带压缩后全长；省略时退化为当前长度（尾部为空）。随后重算显示值 = 基准 + 尾部估算。
+          baseTokensRef.current = ev.totalTokens;
+          measuredLenRef.current = ev.measuredLength ?? history.current.length;
+          refreshContextUsage();
           break;
         case 'aborted':
+          // 中止终结当前消息尝试：构成边界，后续回合正文不得续接到残文上
           next.push({
             kind: 'note',
             text:
               queue.current.length > 0
                 ? t('app.aborted.resumeQueue', { count: queue.current.length })
                 : t('app.aborted.plain'),
+            boundary: true,
           });
           break;
         case 'error':
@@ -841,7 +906,10 @@ export function App({
       const resolved = resolveModelEntry(config, arg);
       if (resolved === null) {
         setModel(arg);
+        modelRef.current = arg;
         setModelLabel(arg);
+        sessionRef.current.model = arg;
+        persist();
         pushItem({ kind: 'note', text: t('app.model.switched', { model: arg }) });
         return;
       }
@@ -853,11 +921,84 @@ export function App({
       }
       providerNameRef.current = resolved.provider;
       setModel(resolved.model);
+      modelRef.current = resolved.model;
       setModelLabel(config.models?.[arg]?.displayName ?? resolved.model);
       setMaxContextSize(resolved.maxContextSize);
+      // 模型是会话级状态：切换即落盘（写会话 model 字段），恢复会话时读回并重建 provider
+      sessionRef.current.model = resolved.model;
+      persist();
       pushItem({ kind: 'note', text: t('app.model.aliasSwitched', { name: arg, model: resolved.model }) });
     },
-    [config, pushItem],
+    [config, persist, pushItem],
+  );
+
+  /**
+   * 按 id 恢复会话（/resume <id> 文本直切与 SessionPicker Enter 确认共用此路径）：
+   * 先落盘当前会话防丢数据，再独立拷贝目标会话的 messages/todos，读回 goal/mode/model 快照并重建 provider，
+   * 清动态工具与计划态，重放历史进 items 并递增 sessionEpoch 重挂 Static。
+   * 找到并恢复返回 true；快照不存在返回 false（供命令路径打印 notFound 提示）。
+   */
+  const resumeSessionById = useCallback(
+    (id: string): boolean => {
+      const data = store.load(ctx.cwd, id);
+      if (data === null) return false;
+      // 先保存当前会话，避免切走丢数据
+      persist();
+      // 独立拷贝，别和 store 里的数组共享
+      history.current = data.messages.map((m) => ({ ...m }));
+      todos.current = data.todos !== undefined ? [...data.todos] : [];
+      imageStore.current.clear();
+      sessionRef.current = data;
+      // 恢复该会话的 goal 快照（active 降级 paused，防 resume 后自动续跑）
+      goal.current.restore(data.goal);
+      setGoalView(goal.current.get() !== null ? { ...goal.current.get()! } : null);
+      subagentCounter.current.spawned = 0;
+      sessionApprovals.current.clear();
+      // 恢复会话级 permission mode（旧快照无 mode 时保持当前，不强制回退）
+      if (data.mode !== undefined) changeMode(data.mode);
+      // 恢复会话级模型：按存储的 model 重建 provider（applyModelAlias 内含 setModel + createProvider + 落盘）。
+      // model 存的是解析后的真实 id，用它反查别名；找不到别名则按 id 直切。
+      if (data.model !== '' && data.model !== modelRef.current) {
+        const alias = Object.keys(config.models ?? {}).find(
+          (a) => (config.models?.[a]?.model ?? a) === data.model,
+        );
+        applyModelAlias(alias ?? data.model);
+      }
+      // 清空动态工具，避免上个会话 tool_search 加载的工具泄漏到恢复的会话
+      clearDynamicTools();
+      setPlanModeBoth(false);
+      prePlanModeRef.current = null;
+      // 思考深度覆盖是会话级状态：恢复到别的会话时回落 config 默认
+      setThinkOverride(undefined);
+      // resume 无真实 usage：前缀基准归零、游标归零，对恢复的全部历史做字符估算填充状态栏
+      // （否则会误显 0，直到用户发出第一条消息拿到真实 usage 才刷新）。下一条真实 usage 再校正。
+      baseTokensRef.current = 0;
+      measuredLenRef.current = 0;
+      refreshContextUsage();
+      {
+        const replay = historyToDisplayItems(data.messages);
+        const switchedNote: DisplayItem = {
+          kind: 'note',
+          text: t('app.resume.switched', {
+            id: data.id,
+            turns: replay.totalTurns,
+            count: history.current.length,
+          }),
+        };
+        const nextItems: DisplayItem[] = [];
+        if (replay.foldedTurns > 0) {
+          nextItems.push({
+            kind: 'note',
+            text: t('app.replay.folded', { folded: replay.foldedTurns, total: replay.totalTurns }),
+          });
+        }
+        nextItems.push(...replay.items, switchedNote);
+        setItems(nextItems);
+      }
+      setSessionEpoch((e) => e + 1);
+      return true;
+    },
+    [applyModelAlias, changeMode, config, ctx.cwd, persist, pushItem, setPlanModeBoth],
   );
 
   /**
@@ -877,6 +1018,15 @@ export function App({
           detail: name === 'off' ? t('thinkPicker.offDetail') : t('thinkPicker.budget', { budget: levels[name] ?? 0 }),
         }),
       });
+      // 余量防线：切到的档位在当前 max_tokens 下正文余量不足时给 warning（不硬拦，尊重用户）。
+      // 运行时切档不走 config 解析期校验，这里是唯一拦截点；不提示的话会静默发出→空响应。
+      const safety = thinkBudgetSafety(name, levels, config.maxTokens);
+      if (!safety.safe) {
+        pushItem({
+          kind: 'note',
+          text: t('app.think.budgetWarning', { budget: safety.budget, maxTokens: config.maxTokens }),
+        });
+      }
       if (history.current.length > 0) {
         pushItem({ kind: 'note', text: t('app.think.cacheWarning') });
       }
@@ -1248,99 +1398,14 @@ export function App({
           })();
           break;
         }
-        case 'sessions': {
+        case 'resume': {
           const metas = store.list(ctx.cwd);
           if (metas.length === 0) {
             pushItem({ kind: 'note', text: t('app.sessions.none') });
           } else {
-            const lines = metas
-              .slice(0, 10)
-              .map((m) =>
-                t('app.sessions.line', {
-                  mark: m.id === sessionRef.current.id ? '* ' : '  ',
-                  id: m.id,
-                  title: m.title ?? t('app.sessions.untitled'),
-                  count: m.messageCount,
-                  updated: m.updatedAt,
-                }),
-              )
-              .join('\n');
-            pushItem({ kind: 'note', text: t('app.sessions.list', { lines }) });
+            setSessionPickerItems(metas);
+            setSessionPickerOpen(true);
           }
-          break;
-        }
-        case 'resume': {
-          if (busyRef.current) {
-            pushItem({ kind: 'note', text: t('app.resume.busy') });
-            break;
-          }
-          const id = args.trim();
-          if (id === '') {
-            const metas = store.list(ctx.cwd);
-            if (metas.length === 0) {
-              pushItem({ kind: 'note', text: t('app.sessions.none') });
-            } else {
-              const lines = metas
-                .slice(0, 20)
-                .map((m) =>
-                  t('app.sessions.line', {
-                    mark: m.id === sessionRef.current.id ? '* ' : '  ',
-                    id: m.id,
-                    title: m.title ?? t('app.sessions.untitled'),
-                    count: m.messageCount,
-                    updated: m.updatedAt,
-                  }),
-                )
-                .join('\n');
-              pushItem({ kind: 'note', text: t('app.resume.list', { lines }) });
-            }
-            break;
-          }
-          const data = store.load(ctx.cwd, id);
-          if (data === null) {
-            pushItem({ kind: 'note', text: t('app.resume.notFound', { id }) });
-            break;
-          }
-          // 先保存当前会话，避免切走丢数据
-          persist();
-          // 独立拷贝，别和 store 里的数组共享
-          history.current = data.messages.map((m) => ({ ...m }));
-          todos.current = data.todos !== undefined ? [...data.todos] : [];
-          imageStore.current.clear();
-          sessionRef.current = data;
-          // 恢复该会话的 goal 快照（active 降级 paused，防 resume 后自动续跑）
-          goal.current.restore(data.goal);
-          setGoalView(goal.current.get() !== null ? { ...goal.current.get()! } : null);
-          subagentCounter.current.spawned = 0;
-          sessionApprovals.current.clear();
-          // 清空动态工具，避免上个会话 tool_search 加载的工具泄漏到恢复的会话
-          clearDynamicTools();
-          setPlanModeBoth(false);
-          prePlanModeRef.current = null;
-          // 思考深度覆盖是会话级状态：恢复到别的会话时回落 config 默认
-          setThinkOverride(undefined);
-          setUsedTokens(0);
-          {
-            const replay = historyToDisplayItems(data.messages);
-            const switchedNote: DisplayItem = {
-              kind: 'note',
-              text: t('app.resume.switched', {
-                id: data.id,
-                turns: replay.totalTurns,
-                count: history.current.length,
-              }),
-            };
-            const nextItems: DisplayItem[] = [];
-            if (replay.foldedTurns > 0) {
-              nextItems.push({
-                kind: 'note',
-                text: t('app.replay.folded', { folded: replay.foldedTurns, total: replay.totalTurns }),
-              });
-            }
-            nextItems.push(...replay.items, switchedNote);
-            setItems(nextItems);
-          }
-          setSessionEpoch((e) => e + 1);
           break;
         }
         case 'skill': {
@@ -1474,6 +1539,9 @@ export function App({
       if (!opts?.silent) setItems((prev) => [...prev, { kind: 'user', text: `${extracted.displayText}${imgNote}` }]);
       history.current.push(stored({ role: 'user', content: extracted.content }, 'user'));
       imageStore.current.clear();
+      // 新 append 的这条还没经历 API 往返：立刻把它计入未测量尾部估算，
+      // 让状态栏在发出请求前就反映新增内容（贴长文本时数字随之变化，不再纹丝不动）。
+      refreshContextUsage();
 
       // turn 边界 skill 指纹检测：目录有变更时静默全量重扫并提示（零成本：指纹未变直接跳过）
       const skillDiff = reloadSkills(false);
@@ -1617,6 +1685,10 @@ export function App({
         abortRef.current = null;
         setBusy(false);
         busyRef.current = false;
+        // 任务清单全部完成：回合收尾即清空（面板不常驻）；有未完成项则跨回合保留
+        if (allTodosDone(todos.current)) {
+          todos.current = [];
+        }
         persist();
         // 循环内未来得及边界 flush 的残余终态通知（最后一回合内才终态）：补进发送队列随队列自动发
         for (const t of background.current.drainSettled()) {
@@ -1632,7 +1704,7 @@ export function App({
           const isNotify = notifyTextRef.current.delete(next);
           void submit(next, isNotify ? { recordHistory: false } : undefined);
         } else {
-          // 队列空了才清空子 agent 进度（保留到最后一条完成时展示）
+          // 兜底：全终态的面板已由上方 effect 冻结摘要后撤下；这里清的是中断等非常规收尾的残留
           setSubagents([]);
         }
       }
@@ -1773,6 +1845,42 @@ export function App({
       (history.current.length > 0 ? wrappedRows(t('app.think.cacheWarning'), overlayInner) : 0) +
       Math.max(itemRows, thinkPickerItems.length > 0 ? 1 : wrappedRows(t('thinkPicker.empty'), overlayInner)) +
       wrappedRows(t('thinkPicker.hint'), overlayInner);
+  } else if (sessionPickerOpen) {
+    // 会话选择器（上界估算，宁多勿少）：margin 1 + 边框 2 + 标题（折行）+ 搜索行 1
+    // + 条目行（每条 = 指针 2 + 标题 + 当前标记 + 间隔 2 + 相对时间/条数，折行后取最宽的 ≤PAGE_SIZE 条）
+    // + 分页行（>PAGE_SIZE 时）+ 底部单行（删除提示/确认/notice，取最长的 deleteConfirm 估上界）。
+    const meta = t('sessionPicker.count', { count: 0 });
+    const itemRows = sessionPickerItems
+      .map((m) => {
+        const label = m.title !== undefined && m.title !== '' ? m.title : m.id;
+        const width =
+          2 +
+          displayWidth(label) +
+          (m.id === sessionRef.current.id ? 1 + displayWidth(t('sessionPicker.current')) : 0) +
+          2 +
+          displayWidth(`${relativeTime(m.updatedAt)} · ${meta}`);
+        return overlayInner === undefined ? 1 : Math.max(1, Math.ceil(width / overlayInner));
+      })
+      .sort((a, b) => b - a)
+      .slice(0, 10)
+      .reduce((n, r) => n + r, 0);
+    const bottomRow = wrappedRows(
+      t('sessionPicker.deleteConfirm', { title: 'x'.repeat(20) }),
+      overlayInner,
+    );
+    promptRows =
+      1 +
+      2 +
+      wrappedRows(t('sessionPicker.title'), overlayInner) +
+      1 +
+      Math.max(itemRows, sessionPickerItems.length > 0 ? 1 : wrappedRows(t('sessionPicker.empty'), overlayInner)) +
+      (sessionPickerItems.length > 10
+        ? wrappedRows(
+            t('sessionPicker.pageInfo', { start: 1, end: 10, total: sessionPickerItems.length }),
+            overlayInner,
+          )
+        : 0) +
+      bottomRow;
   } else {
     promptRows = computePromptRows(input, {
       busy,
@@ -1796,10 +1904,10 @@ export function App({
             0,
           )
         : 0,
-    // QueuePreview：标题 1 + 前 3 条每条 ≤ 2 行 + 「还有 N 条」1
+    // QueuePreview：标题 1 + 前 3 条每条 ≤ 2 行 + 「还有 N 条」1 + ↑ 取回提示 1
     queueRows:
       queueLen > 0
-        ? 1 +
+        ? 2 +
           queue.current.slice(0, 3).reduce((n, q) => n + Math.min(2, q.split('\n').length), 0) +
           (queueLen > 3 ? 1 : 0)
         : 0,
@@ -1808,6 +1916,8 @@ export function App({
     // 思考流式预览：标题 1 + 尾部 ≤THINKING_PREVIEW_LINES 行（各行 wrap=truncate）
     thinkingRows:
       thinkingPreview !== '' ? 1 + Math.min(thinkingPreview.split('\n').length, THINKING_PREVIEW_LINES) : 0,
+    // WorkingStatus 忙碌态状态行：margin 1 + spinner 行 1 + tip 行 1（busy 且已记起始时间才显示）
+    workingRows: busy && turnStartAt > 0 ? 3 : 0,
   });
   logRenderBudget(stdout?.rows, budget);
   // stdout.rows 随 resize 自动更新，预算随之重算；非 TTY / 测试环境无 rows → undefined 不窗口化
@@ -1821,17 +1931,25 @@ export function App({
             <WelcomeBox key="welcome" cwd={ctx.cwd} sessionId={sessionRef.current.id} model={model} version={VERSION} />
           ) : (
             // Static 恒折叠渲染：ink <Static> append-only，条目进 scrollback 时渲染结果即冻结。
-            // 若带上 Ctrl+O 的 expanded 真值，展开态会被永久冻进历史，事后 Ctrl+O 无法收回
-            //（空闲时条目全在 Static，Ctrl+O 看似失效）。展开只是动态区的临时视图，历史恒紧凑。
+            // 若带上 Ctrl+O 的 expanded 真值，展开态会被永久冻进历史，事后 Ctrl+O 无法收回。
+            // 展开只是动态区的临时视图（在途尾部走 MessageList；空闲回看走下方 ExpandedReview），
+            // 历史恒紧凑。
             <MessageItem key={i} item={entry} expanded={false} />
           )
         }
       </Static>
+      {/* 空闲 + 展开模式：最近的可展开工具输出在动态区以展开态重渲（临时视图，不碰 scrollback） */}
+      {!busy && expanded ? <ExpandedReview items={items} maxRows={liveMaxRows} /> : null}
       <MessageList items={liveItems} expanded={expanded} busy={busy} maxRows={liveMaxRows} />
       {budget.thinkingRows > 0 ? <ThinkingPreview text={thinkingPreview} maxLines={budget.thinkingRows - 1} /> : null}
       <AgentGroup agents={subagents} />
       {budget.showTodos ? <TodoPanel todos={todos.current} /> : null}
       {budget.showQueue ? <QueuePreview queue={queue.current} /> : null}
+      {/* 忙碌态状态行：spinner + 状态词 + elapsed + 本轮 output token，独占块放输入框正上方（下含 tip）。
+          弹层（提问/审批/选择器）态不显示——那些态本就不 busy。 */}
+      {busy && turnStartAt > 0 ? (
+        <WorkingStatus startedAt={turnStartAt} outputTokens={Math.floor(turnOutputChars / 3)} />
+      ) : null}
       {imageCount > 0 ? (
         <Box>
           <Text color="cyan">{t('app.image.banner', { count: imageCount })}</Text>
@@ -1873,8 +1991,25 @@ export function App({
             if (name !== null) applyThinkLevel(name);
           }}
         />
+      ) : sessionPickerOpen ? (
+        <SessionPicker
+          sessions={sessionPickerItems}
+          currentId={sessionRef.current.id}
+          onSelect={(id) => {
+            setSessionPickerOpen(false);
+            if (id !== null && !resumeSessionById(id)) {
+              pushItem({ kind: 'note', text: t('app.resume.notFound', { id }) });
+            }
+          }}
+          onDelete={(id) => {
+            // 删除落盘（不可逆），成功则从快照移除该项让选择器刷新
+            const ok = store.delete(ctx.cwd, id);
+            if (ok) setSessionPickerItems((prev) => prev.filter((m) => m.id !== id));
+            return ok;
+          }}
+        />
       ) : (
-        <PromptInput value={input} onChange={setInput} onSubmit={submit} busy={busy} history={inputHistory} primed={backtrackPrimed} exitPrimed={exitPrimed} />
+        <PromptInput value={input} onChange={setInput} onSubmit={submit} busy={busy} history={inputHistory} primed={backtrackPrimed} exitPrimed={exitPrimed} onRecallQueued={recallQueued} />
       )}
       <StatusBar
         mode={mode}

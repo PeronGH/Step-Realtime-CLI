@@ -31,6 +31,12 @@ export interface TurnOutcome {
   stopReason: StopReason;
   /** 本回合模型返回的真实 token usage（成功拿到 finalMessage 时带上，供压缩判断）。 */
   usage?: Anthropic.Usage;
+  /**
+   * 思考预算耗尽标记：stop_reason==='max_tokens' 且响应无正文/工具调用（仅 thinking 块）。
+   * 语义是「思考吃满了 max_tokens，正文没有空间生成」——与「正文写到一半被截断」不同，
+   * loop 据此给出「调大 max_tokens / 降 thinking 档位」的确定性提示，而非「回复继续」。
+   */
+  thinkingExhausted?: boolean;
 }
 
 export interface RunTurnOptions {
@@ -136,9 +142,17 @@ export async function* runTurn(
       }
       if (signal?.aborted) return { stopReason: 'aborted' };
       const msg = await stream.finalMessage();
-      // 空响应契约：流正常结束但无正文也无工具调用，与 SDK 空流错误同族——
-      // 抛进下方 catch 统一走重试。emittedText 守卫仍优先：已流出思考时不重试，避免重复展示。
+      // 空响应契约：流正常结束但无正文也无工具调用。先按 stop_reason 分型：
+      // - stop_reason==='max_tokens'：思考吃满了输出预算，正文没空间生成（配置性问题，
+      //   重试无意义——预算组合不变必然复现）。不抛错，落 final 走下方 max_tokens 分支，
+      //   携带 thinkingExhausted 标记让 loop 给「调 max_tokens / 降档」的确定性提示。
+      // - 其余（end_turn 等）：真正的服务端瞬时空响应，抛 EmptyResponseError 走重试。
+      //   emittedText 守卫仍优先：已流出思考时不重试，避免重复展示。
       if (isEmptyResponse(msg)) {
+        if (msg.stop_reason === 'max_tokens') {
+          final = msg;
+          break;
+        }
         throw new EmptyResponseError('empty response (no text, no tool_use)');
       }
       final = msg;
@@ -178,8 +192,13 @@ export async function* runTurn(
   // 输出达 max_tokens 上限被截断：截断响应里的 tool_use 不执行——
   // 半截 JSON 参数可能解析出错误输入，执行有副作用风险。assistant 消息保留进历史，
   // 交外层 loop 发明确提示后结束回合（不自动续写）。
+  // thinkingExhausted：响应仅 thinking 块、无正文/工具调用——思考吃满预算，正文零输出，
+  // 与「正文写到一半被截断」区分开，loop 据此给「调 max_tokens / 降档」提示。
   if (final.stop_reason === 'max_tokens') {
-    return { stopReason: 'max_tokens', usage };
+    const thinkingExhausted = isEmptyResponse(final);
+    return thinkingExhausted
+      ? { stopReason: 'max_tokens', usage, thinkingExhausted: true }
+      : { stopReason: 'max_tokens', usage };
   }
 
   const toolUses = final.content.filter(

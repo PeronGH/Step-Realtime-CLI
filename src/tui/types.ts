@@ -16,7 +16,16 @@ export type DisplayItem =
       /** workflow 工具的步骤面板状态（tool_start 时从 input.steps 装配，onWorkflowStep/子 agent 事件推进）。 */
       workflow?: import('./WorkflowPanel.js').WorkflowPanelState;
     }
-  | { kind: 'note'; text: string }
+  | {
+      kind: 'note';
+      text: string;
+      /**
+       * 为 true 表示这是 agent 流事件（retry/notice），构成消息边界：流式正文不得越过它
+       * 续接前面的 assistant（重试/新一轮的消息必须另开条目）。缺省为 UI 侧提示
+       * （队列回执、斜杠命令输出等），不构成边界——流式正文可越过它续接，一条消息不被劈开。
+       */
+      boundary?: boolean;
+    }
   | { kind: 'error'; text: string }
   | { kind: 'goalPanel'; data: import('./GoalPanel.js').GoalPanelData }
   | { kind: 'cron'; data: import('./CronCard.js').CronCardData };

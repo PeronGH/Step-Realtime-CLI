@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_THINKING_LEVELS, type ThinkingConfig } from '../../src/config/config.js';
 import {
   parseThinkArgs,
+  thinkBudgetSafety,
   thinkLevelsOf,
   thinkStatusLabel,
   thinkStreamParam,
@@ -94,5 +95,31 @@ describe('thinkLevelsOf', () => {
   it('config 缺省/缺 levels → 内置默认表；有 levels → 原样返回', () => {
     expect(thinkLevelsOf(undefined)).toEqual(DEFAULT_THINKING_LEVELS);
     expect(thinkLevelsOf({ enabled: false, levels: { deep: 8192 } })).toEqual({ deep: 8192 });
+  });
+});
+
+describe('thinkBudgetSafety（运行时切档余量防线）', () => {
+  it('off / undefined（无 budget）→ 恒安全', () => {
+    expect(thinkBudgetSafety(undefined, LEVELS, 32768)).toEqual({ safe: true, deficit: 0, budget: 0 });
+    expect(thinkBudgetSafety('off', LEVELS, 32768)).toEqual({ safe: true, deficit: 0, budget: 0 });
+  });
+
+  it('余量充足 → safe（默认新基准 65536 下 high 档安全）', () => {
+    // 65536 - 32000 = 33536 ≫ 2048
+    expect(thinkBudgetSafety('high', LEVELS, 65536)).toEqual({ safe: true, deficit: 0, budget: 32000 });
+  });
+
+  it('余量不足 → unsafe 并给出欠缺量（旧默认 32768 下 high 档危险）', () => {
+    // 32768 - 32000 = 768 < 2048，欠 2048 - 768 = 1280
+    expect(thinkBudgetSafety('high', LEVELS, 32768)).toEqual({ safe: false, deficit: 1280, budget: 32000 });
+  });
+
+  it('边界：余量恰好等于最小余量 → safe', () => {
+    // margin === THINKING_TEXT_MARGIN(2048) 时 safe（≥ 判定）
+    expect(thinkBudgetSafety('low', { low: 4096 }, 6144)).toEqual({ safe: true, deficit: 0, budget: 4096 });
+  });
+
+  it('档位名不在表内 → 回落无 budget、恒安全（与 thinkStreamParam 防御一致）', () => {
+    expect(thinkBudgetSafety('ghost', LEVELS, 100)).toEqual({ safe: true, deficit: 0, budget: 0 });
   });
 });

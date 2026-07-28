@@ -165,4 +165,115 @@ describe('SessionPicker', () => {
     expect(out).toContain('alpha');
     expect(out).toContain('beta');
   });
+
+  it('Ctrl+D 发起删除确认，y 确认调用 onDelete 带高亮 id', async () => {
+    const onDelete = vi.fn(() => true);
+    const { lastFrame, stdin } = render(
+      React.createElement(SessionPicker, {
+        sessions: [meta('id1', '第一个会话'), meta('id2', '第二个会话')],
+        onDelete,
+        onSelect: () => {},
+      }),
+    );
+    await delay();
+    stdin.write('\x04'); // Ctrl+D 对高亮（第一条）发起删除
+    await delay();
+    expect(lastFrame() ?? '').toContain('删除会话'); // 进入二次确认态
+    stdin.write('y'); // 确认
+    await delay();
+    expect(onDelete).toHaveBeenCalledWith('id1');
+  });
+
+  it('Delete 键发起删除确认，n 取消不调用 onDelete', async () => {
+    const onDelete = vi.fn(() => true);
+    const { lastFrame, stdin } = render(
+      React.createElement(SessionPicker, {
+        sessions: [meta('id1', 'a'), meta('id2', 'b')],
+        onDelete,
+        onSelect: () => {},
+      }),
+    );
+    await delay();
+    stdin.write('\u001B[3~'); // Delete 键
+    await delay();
+    expect(lastFrame() ?? '').toContain('删除会话');
+    stdin.write('n'); // 取消
+    await delay();
+    expect(onDelete).not.toHaveBeenCalled();
+    // 取消后回到列表，仍可见两条
+    const out = lastFrame() ?? '';
+    expect(out).toContain('a');
+    expect(out).toContain('b');
+  });
+
+  it('确认态下 Esc 取消删除', async () => {
+    const onDelete = vi.fn(() => true);
+    const onSelect = vi.fn();
+    const { stdin } = render(
+      React.createElement(SessionPicker, {
+        sessions: [meta('id1', 'a')],
+        onDelete,
+        onSelect,
+      }),
+    );
+    await delay();
+    stdin.write('\x04'); // Ctrl+D 进入确认
+    await delay();
+    stdin.write('\u001B'); // Esc 取消删除（不应触发 onSelect(null)）
+    await delay();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('高亮为当前会话时拒绝删除并给提示', async () => {
+    const onDelete = vi.fn(() => true);
+    const { lastFrame, stdin } = render(
+      React.createElement(SessionPicker, {
+        sessions: [meta('id1', 'a'), meta('id2', 'b')],
+        currentId: 'id1',
+        onDelete,
+        onSelect: () => {},
+      }),
+    );
+    await delay();
+    stdin.write('\x04'); // 高亮第一条（当前会话）发起删除
+    await delay();
+    expect(lastFrame() ?? '').toContain('无法删除当前正在使用的会话');
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('当前会话在列表中显示「当前」标记', () => {
+    const { lastFrame } = render(
+      React.createElement(SessionPicker, {
+        sessions: [meta('id1', 'alpha'), meta('id2', 'beta')],
+        currentId: 'id2',
+        onSelect: () => {},
+      }),
+    );
+    expect(lastFrame() ?? '').toContain('当前');
+  });
+
+  it('删除后列表刷新：移除该项后仅剩其余会话', async () => {
+    const remaining = [meta('id1', 'alpha'), meta('id2', 'beta')];
+    // 模拟上层删除：onDelete 返回 true，测试通过重渲染 sessions 验证组件消费新数组
+    const onDelete = vi.fn((id: string) => {
+      const idx = remaining.findIndex((m) => m.id === id);
+      if (idx >= 0) remaining.splice(idx, 1);
+      return true;
+    });
+    const { lastFrame, stdin, rerender } = render(
+      React.createElement(SessionPicker, { sessions: remaining, onDelete, onSelect: () => {} }),
+    );
+    await delay();
+    stdin.write('\x04'); // 删除高亮（alpha）
+    await delay();
+    stdin.write('y');
+    await delay();
+    expect(onDelete).toHaveBeenCalledWith('id1');
+    rerender(React.createElement(SessionPicker, { sessions: remaining, onDelete, onSelect: () => {} }));
+    await delay();
+    const out = lastFrame() ?? '';
+    expect(out).not.toContain('alpha');
+    expect(out).toContain('beta');
+  });
 });

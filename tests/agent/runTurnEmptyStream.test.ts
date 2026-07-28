@@ -97,4 +97,24 @@ describe('runAgent 空流/空响应重试', () => {
     expect(events.some((e) => e.type === 'retry')).toBe(false);
     expect(events.some((e) => e.type === 'error')).toBe(true);
   });
+
+  it('thinking 吃满预算（stop_reason=max_tokens + 仅 thinking 块）→ 不重试、不报空响应，给「调 max_tokens/降档」确定性提示', async () => {
+    // 无 thinkingChunks 流出（emittedText=false），直接靠 finalMessage 的 stop_reason 分型：
+    // 应走 max_tokens 分支给 thinkingExhausted 提示，而非误判为瞬时空响应去重试。
+    const { provider, streamCalls } = makeFakeProvider([
+      { textChunks: [], finalContent: [thinkingBlock('思考但没输出正文')], stopReason: 'max_tokens' },
+    ]);
+    const events = await collect(
+      runAgent({ provider, system: 'sys', ctx: { cwd: process.cwd() }, messages: [sm('问')] }),
+    );
+
+    expect(streamCalls()).toBe(1);
+    expect(events.some((e) => e.type === 'retry')).toBe(false);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    const notice = events.find((e) => e.type === 'notice');
+    expect(notice).toBeDefined();
+    expect((notice as { message: string }).message).toContain('思考消耗');
+    expect((notice as { message: string }).message).not.toContain('空响应');
+    expect(events.at(-1)!.type).toBe('turn_done');
+  });
 });

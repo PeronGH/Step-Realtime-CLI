@@ -57,12 +57,12 @@ describe('PromptInput 斜杠命令补全', () => {
     expect(out).toContain('显示可用命令');
   });
 
-  it('busy 时输入框下方显示随机提示行', () => {
+  it('busy 时输入框内不再显示 tip 行（tip 已移到独立的 WorkingStatus 状态块）', () => {
     const { lastFrame } = render(
       React.createElement(PromptInput, { value: '', onChange: () => {}, onSubmit: () => {}, busy: true }),
     );
     const out = lastFrame() ?? '';
-    expect(out).toContain('提示：');
+    expect(out).not.toContain('提示：');
   });
 
   it('空闲时不显示提示行', () => {
@@ -71,6 +71,21 @@ describe('PromptInput 斜杠命令补全', () => {
     );
     const out = lastFrame() ?? '';
     expect(out).not.toContain('提示：');
+  });
+
+  it('空输入时 placeholder 完整可读（光标反色独立空格，不吃掉 CJK 首字）', () => {
+    const idle = render(
+      React.createElement(PromptInput, { value: '', onChange: () => {}, onSubmit: () => {}, busy: false }),
+    );
+    // 首字「输」不能被反色块吞掉（旧实现反色 placeholder[0]，全宽字符被吃后显示成花屏）
+    expect(idle.lastFrame() ?? '').toContain('输入指令，回车发送');
+    idle.unmount();
+
+    const busyFrame = render(
+      React.createElement(PromptInput, { value: '', onChange: () => {}, onSubmit: () => {}, busy: true }),
+    );
+    expect(busyFrame.lastFrame() ?? '').toContain('思考中…输入将加入发送队列');
+    busyFrame.unmount();
   });
 
   it('exitPrimed 时显示「再按一次 Ctrl+C 退出」', () => {
@@ -315,5 +330,187 @@ describe('PromptInput 按键导航与编辑（自研输入组件）', () => {
     await delay(30);
     await type(stdin, 'X'); // 直接追加，证明光标在行尾
     expect(state.value).toBe('oldcmdX');
+  });
+
+  it('回归：↑ 回溯到斜杠命令不弹菜单，可继续向上翻历史', async () => {
+    const { stdin, state, lastFrame } = setup('', ['older msg', CMD(0)]);
+    await delay(20);
+    stdin.write('\x1B[A'); // ↑ → 最新一条历史是 /help 命令
+    await delay(30);
+    expect(state.value).toBe(CMD(0));
+    // 菜单被抑制：不出现菜单的描述行
+    expect(lastFrame() ?? '').not.toContain('显示可用命令');
+    stdin.write('\x1B[A'); // ↑ 继续向上 → 更早的历史，不被菜单选择卡死
+    await delay(30);
+    expect(state.value).toBe('older msg');
+  });
+
+  it('回溯出命令后改字重新武装菜单', async () => {
+    const { stdin, state, lastFrame } = setup('', [CMD(0)]);
+    await delay(20);
+    stdin.write('\x1B[A'); // ↑ 回溯出 /help（菜单抑制）
+    await delay(30);
+    expect(state.value).toBe(CMD(0));
+    expect(lastFrame() ?? '').not.toContain('显示可用命令');
+    stdin.write('\x7f'); // Backspace 删一个字符 → 改字解除抑制，菜单重新弹出
+    await delay(30);
+    expect(state.value).toBe(CMD(0).slice(0, -1));
+    expect(lastFrame() ?? '').toContain('显示可用命令');
+  });
+});
+
+
+describe('PromptInput 粘贴换行归一（\r\n / \r → \n）', () => {
+  function PasteHarness({
+    initial = '',
+    spy,
+  }: {
+    initial?: string;
+    spy: (v: string) => void;
+  }): React.ReactElement {
+    const [v, setV] = React.useState(initial);
+    return React.createElement(PromptInput, {
+      value: v,
+      onChange: (nv: string) => {
+        spy(nv);
+        setV(nv);
+      },
+      onSubmit: () => {},
+      busy: false,
+    });
+  }
+
+  const setup = (initial = '') => {
+    const state = { value: initial };
+    const inst = render(React.createElement(PasteHarness, { initial, spy: (v: string) => (state.value = v) }));
+    return { ...inst, state };
+  };
+
+  it('粘贴 CRLF 文本：\r 被剥掉，换行保留为多行，不触发提交', async () => {
+    const { stdin, state, lastFrame } = setup();
+    await delay(20);
+    stdin.write('abc\r\ndef');
+    await delay(50);
+    expect(state.value).toBe('abc\ndef');
+    const out = lastFrame() ?? '';
+    expect(out).not.toContain('\r');
+    expect(out).toContain('abc');
+    expect(out).toContain('def');
+  });
+
+  it('粘贴裸 CR 文本同样归一为换行', async () => {
+    const { stdin, state } = setup();
+    await delay(20);
+    stdin.write('x\ry');
+    await delay(50);
+    expect(state.value).toBe('x\ny');
+  });
+
+  it('多行值光标落在换行符上时渲染不吞行', async () => {
+    const { stdin, lastFrame } = setup('ab\ncd');
+    await delay(20);
+    // 字符序列 a b \n c d，光标初始在末尾（5）；←×3 落到 \n（索引 2）上
+    for (let i = 0; i < 3; i += 1) {
+      stdin.write('\x1B[D');
+      await delay(20);
+    }
+    const out = lastFrame() ?? '';
+    expect(out).toContain('ab');
+    expect(out).toContain('cd');
+    // 换行仍在：两行分列渲染（边框行内 ab 与 cd 不同行）
+    const lines = out.split('\n').filter((l) => l.includes('ab') || l.includes('cd'));
+    expect(lines.length).toBe(2);
+  });
+});
+
+
+describe('PromptInput 多行值排版（防 squash 回归）', () => {
+  it('多行内容：「› 」空格保留，续行缩进与首行文本对齐', () => {
+    const { lastFrame } = render(
+      React.createElement(PromptInput, {
+        value: '第一行\n第二行',
+        onChange: () => {},
+        onSubmit: () => {},
+        busy: false,
+      }),
+    );
+    const out = lastFrame() ?? '';
+    expect(out).toContain('› 第一行');
+    // 续行：边框 1 + 内边距 1 + 2 列悬挂（对齐首行文本起点）
+    expect(out).toContain('│   第二行');
+  });
+});
+
+
+describe('PromptInput 候选队列取回（busy + 空输入时 ↑）', () => {
+  function RecallHarness({
+    busy,
+    history = [],
+    recall,
+    spy,
+  }: {
+    busy: boolean;
+    history?: string[];
+    recall: () => string | undefined;
+    spy: (v: string) => void;
+  }): React.ReactElement {
+    const [v, setV] = React.useState('');
+    return React.createElement(PromptInput, {
+      value: v,
+      onChange: (nv: string) => {
+        spy(nv);
+        setV(nv);
+      },
+      onSubmit: () => {},
+      busy,
+      history,
+      onRecallQueued: recall,
+    });
+  }
+
+  const setupRecall = (opts: { busy: boolean; history?: string[]; recall: () => string | undefined }) => {
+    const state = { value: '' };
+    const inst = render(
+      React.createElement(RecallHarness, { ...opts, spy: (v: string) => (state.value = v) }),
+    );
+    return { ...inst, state };
+  };
+
+  const type = async (stdin: { write: (s: string) => void }, s: string): Promise<void> => {
+    stdin.write(s);
+    await delay(30);
+  };
+
+  it('busy + 空输入：↑ 把取回的队尾文本填进输入框', async () => {
+    const { stdin, state } = setupRecall({ busy: true, recall: () => '排队的那条' });
+    await delay(20);
+    await type(stdin, '\x1B[A'); // ↑
+    expect(state.value).toBe('排队的那条');
+  });
+
+  it('busy + 队列空（recall 返回 undefined）：↑ 落回历史导航', async () => {
+    const { stdin, state } = setupRecall({ busy: true, history: ['上一次输入'], recall: () => undefined });
+    await delay(20);
+    await type(stdin, '\x1B[A'); // ↑
+    expect(state.value).toBe('上一次输入');
+  });
+
+  it('busy + 输入框非空：↑ 走历史导航，不调 recall', async () => {
+    const recall = vi.fn(() => '排队的那条');
+    const { stdin, state } = setupRecall({ busy: true, history: ['上一次输入'], recall });
+    await delay(20);
+    await type(stdin, 'a'); // 输入框非空
+    await type(stdin, '\x1B[A'); // ↑
+    expect(recall).not.toHaveBeenCalled();
+    expect(state.value).toBe('上一次输入');
+  });
+
+  it('空闲 + 空输入：↑ 不调 recall，走历史导航', async () => {
+    const recall = vi.fn(() => '排队的那条');
+    const { stdin, state } = setupRecall({ busy: false, history: ['上一次输入'], recall });
+    await delay(20);
+    await type(stdin, '\x1B[A'); // ↑
+    expect(recall).not.toHaveBeenCalled();
+    expect(state.value).toBe('上一次输入');
   });
 });

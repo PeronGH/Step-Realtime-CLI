@@ -14,6 +14,28 @@ function toolItem(over: Partial<Extract<DisplayItem, { kind: 'tool' }>>): Extrac
 const bigResult = Array.from({ length: 12 }, (_, i) => `line${i + 1}`).join('\n');
 
 describe('ToolCall 折叠/展开', () => {
+  it('skill 工具标题带上技能名（否则多次激活的卡片长得一模一样）', () => {
+    const { lastFrame, unmount } = render(
+      React.createElement(ToolCall, {
+        item: toolItem({ name: 'skill', input: { skill: 'pkm-vault-ops' } }),
+        expanded: false,
+      }),
+    );
+    expect(lastFrame() ?? '').toContain('pkm-vault-ops');
+    unmount();
+  });
+
+  it('常规工具仍按 path/command 取摘要', () => {
+    const { lastFrame, unmount } = render(
+      React.createElement(ToolCall, {
+        item: toolItem({ name: 'read', input: { path: 'src/tui/ToolCall.tsx' } }),
+        expanded: false,
+      }),
+    );
+    expect(lastFrame() ?? '').toContain('src/tui/ToolCall.tsx');
+    unmount();
+  });
+
   it('成功且有输出，折叠态只显示「N 行输出 · Ctrl+O 展开」提示，不显示正文', () => {
     const { lastFrame } = render(
       React.createElement(ToolCall, { item: toolItem({ result: bigResult }), expanded: false }),

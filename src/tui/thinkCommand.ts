@@ -1,4 +1,4 @@
-import { DEFAULT_THINKING_LEVELS, PROVIDER_PRESETS, type ThinkingConfig } from '../config/config.js';
+import { DEFAULT_THINKING_LEVELS, PROVIDER_PRESETS, THINKING_TEXT_MARGIN, type ThinkingConfig } from '../config/config.js';
 
 /**
  * /think 命令的纯函数层：参数解析、覆盖 → 请求参数投影、状态栏标签、门控判定。
@@ -74,4 +74,24 @@ export function thinkingAvailable(providerName: string, thinkingCfg?: ThinkingCo
 /** 取当前生效的档位表（config 缺省时回落内置默认表，防御手工构造的配置对象）。 */
 export function thinkLevelsOf(thinkingCfg?: ThinkingConfig): Record<string, number> {
   return thinkingCfg?.levels ?? DEFAULT_THINKING_LEVELS;
+}
+
+/**
+ * 思考预算安全判定：正文最小余量 maxTokens - budget ≥ THINKING_TEXT_MARGIN。
+ * 与 config.ts 的解析期余量校验同口径（复用同一常量），但用于运行时 /think 切档——
+ * 切档不走 config 解析，需在 UI 层单独把这道防线补上。
+ * off/undefined（无 budget）恒安全。deficit 为正表示欠缺的余量（供提示展示）。
+ */
+export function thinkBudgetSafety(
+  override: ThinkOverride | undefined,
+  levels: Record<string, number>,
+  maxTokens: number,
+): { safe: boolean; deficit: number; budget: number } {
+  const param = thinkStreamParam(override, levels);
+  if (param === undefined || param === null || param.budgetTokens === undefined) {
+    return { safe: true, deficit: 0, budget: 0 };
+  }
+  const budget = param.budgetTokens;
+  const margin = maxTokens - budget;
+  return { safe: margin >= THINKING_TEXT_MARGIN, deficit: Math.max(0, THINKING_TEXT_MARGIN - margin), budget };
 }

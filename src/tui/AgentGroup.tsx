@@ -18,6 +18,28 @@ export interface SubagentProgress {
 }
 
 /**
+ * 全部终态后冻结进历史的纯文本摘要。
+ * 运行进度由动态面板承担，完成结果由历史承担：面板撤下后，scrollback 里留有可回看的定稿记录。
+ */
+export function formatAgentGroupSummary(agents: readonly SubagentProgress[]): string {
+  const errored = agents.filter((a) => a.status === 'error').length;
+  const many = agents.length > 1;
+  const header = many
+    ? t('agentGroup.header.manyDone', {
+        total: agents.length,
+        failed: errored > 0 ? t('agentGroup.failedSuffix', { count: errored }) : '',
+      })
+    : t('agentGroup.header.singleDone', { failed: errored > 0 ? t('agentGroup.failedTag') : '' });
+  const lines = agents.map((a, i) => {
+    const branch = i === agents.length - 1 ? '└─' : '├─';
+    const mark = a.status === 'done' ? '✓' : '✗';
+    const statusText = a.status === 'done' ? t('agentGroup.status.done') : t('agentGroup.status.error');
+    return `${branch} ${a.type} · ${a.description} · ${a.toolCount} tools · ${mark} ${statusText}`;
+  });
+  return [`✓ ${header}`, ...lines].join('\n');
+}
+
+/**
  * 并行子 agent（一轮多调用并行）的树形分组面板。
  * 头部计数 + 每个子 agent 一行（类型·描述·tools·状态）+ 运行中的最新活动。
  */
