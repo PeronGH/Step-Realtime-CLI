@@ -56,6 +56,8 @@ step sessions delete <id>   # 删除
 
 对话变长接近上下文上限时自动压缩：先微压缩（清旧工具结果正文），仍超再做全量 LLM 摘要。触发条件可在 `[compaction]` 段配置。手动压缩用 `/compact`。
 
+摘要生成后要过质量校验（非空、信息量达到被压缩量的一定比例、不含历史渲染标记），不合格会缩小输入重试，连续失败则放弃本次压缩、完整保留历史。详见 [配置参考的 `[compaction]` 段](configuration.md#compaction-上下文压缩)。
+
 完整的原始历史不受压缩影响：每个会话另存一份 append-only 全量日志（`<id>.full.jsonl`），供 `/reflect` 使用。
 
 ## 回顾（/reflect）
