@@ -4,7 +4,7 @@
 
 - **Node.js >= 22**（`glob` 工具用到 `node:fs.globSync`，该 API 自 Node 22 起可用）
 - **pnpm**（包管理）
-- Windows 用户：`bash` 工具会自动探测 Git Bash，建议安装 [Git for Windows](https://git-scm.com/download/win)
+- Windows 用户：`bash` 工具优先使用 Git Bash（推荐安装 [Git for Windows](https://git-scm.com/download/win)），未安装时依次回退 WSL、busybox-w32、PowerShell。Git Bash 装在非标准路径时，可把 `bash.exe` 绝对路径设到环境变量 `STEP_SHELL_PATH`。
 
 ## 从源码安装
 
@@ -45,6 +45,6 @@ pnpm unlink --global   # 移除全局 step 命令
 
 **`step` 命令找不到**：`pnpm link --global` 的目标目录不在 PATH 里。执行 `pnpm bin --global` 查看目录，把它加入 PATH。
 
-**Windows 下 `bash` 工具报错**：确认 Git Bash 已安装且在 PATH 中（`bash --version` 能跑通）。
+**Windows 下 `bash` 工具报错「未找到可用的 shell 解释器」**：说明 Git Bash、WSL、busybox、PowerShell 都没探测到。装 [Git for Windows](https://git-scm.com/download/win) 最省事；已装但在非标准路径时，把 `bash.exe` 绝对路径设到环境变量 `STEP_SHELL_PATH`。
 
 **构建报类型错误**：先 `pnpm install` 确保依赖完整，再 `pnpm build`；仍失败跑 `pnpm typecheck` 看具体位置。

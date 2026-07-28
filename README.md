@@ -33,10 +33,10 @@
 - **输入框编辑**：自研单行输入组件，支持 Home/End、Ctrl+A/E、Ctrl+←/→ 与 Alt+B/F 词移动、Ctrl+W/U/K 删除键集
 - **图片粘贴**：Alt+V 从剪贴板粘贴图片随消息发送（走模型的 base64 图片理解；剪贴板读取目前 Windows 支持）
 - **可重试**：对网络 / 5xx / 限流 / 空流·空响应错误指数退避重试（未输出内容才重试），优先采用响应的 `Retry-After` 头；并行子 agent 遇 429 阶梯重排队
-- **会话持久化**：自动保存，`--continue` 续接、`--session` / `--resume` 指定、`/sessions` 查看、`/fork` 分叉、`/reflect` 沉淀方法论；恢复时把历史对话重新渲染到终端（长会话按最近若干轮重放，恢复提示给出「轮次 · 条消息」双口径）
+- **会话持久化**：自动保存，`--continue` 续接、`--session` / `--resume` 指定、`/fork` 分叉、`/reflect` 沉淀方法论；`/resume` 无参（或 `step -r`）打开交互式会话选择器（↑↓ 分页浏览、打字搜索、Enter 恢复、Delete/Ctrl+D 删除带二次确认），恢复时把历史对话重新渲染到终端（长会话按最近若干轮重放，恢复提示给出「轮次 · 条消息」双口径）；权限模式与模型随会话持久化，恢复会话时读回
 - **上下文压缩**：接近上限时自动微压缩旧工具结果，`/compact` 触发全量摘要
 - **国际化**：`/lang` 在中英文界面间切换（写回 config.toml 持久化；也可直接配置 `language = "en"`）
-- 跨平台：文件操作走 Node 原生 API，`bash` 工具在 Windows 下自动探测 Git Bash
+- 跨平台：文件操作走 Node 原生 API，`bash` 工具在 Windows 下优先 Git Bash，无则回退 WSL/busybox/PowerShell
 - 单元测试用 vitest（`pnpm test`），CI 在 Ubuntu / Windows / macOS 三平台跑 typecheck + build + test
 
 ## 文档

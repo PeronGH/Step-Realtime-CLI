@@ -41,9 +41,10 @@ provider = "stepfun"                 # 默认 stepfun（anthropic 协议）
 | `base_url` | string | API 地址；**是否带 `/v1` 取决于协议**——anthropic 不带（SDK 自拼 `/v1/messages`），openai / openai_responses 要带（拼 `/chat/completions`、`/responses`），见下方[协议与 provider](#协议与-provider) |
 | `model` | string | 模型名，缺省用 provider 预设；可填 `[models]` 里的别名（启动时展开）；可用环境变量或命令行 `--model` 覆盖 |
 | `max_context_size` | int | 上下文上限 token 数，默认 262144 |
-| `max_tokens` | int | 单次响应最大输出 token，默认 32768 |
+| `max_tokens` | int | 单次响应最大输出 token，默认 65536（足够容纳最高思考档位的预算 + 正文余量，避免思考吃满配额导致正文零输出） |
 | `language` | string | 界面语言：`zh`（默认）/ `en` |
 | `agents_paths` | string[] | 覆盖 AGENTS.md 收集，见 [AGENTS.md 机制](./agents-md.md) |
+| `agents_md_max_bytes` | int | AGENTS.md 总量预算（UTF-8 字节），默认 32768；`0` = 禁用加载；发生截断时启动会提示，见 [AGENTS.md 机制](./agents-md.md) |
 | `extra_skill_dirs` | string[] | 追加 skill 扫描目录，见[技能、插件与 MCP](./skills-and-mcp.md) |
 | `disabled_skills` | string[] | 按名排除 skill（任何来源生效），见[技能、插件与 MCP](./skills-and-mcp.md) |
 
@@ -135,9 +136,11 @@ high = 32000
 | `levels` | low/medium/high = 1024/4096/32000 | 档位表（档位名 → budget），自定义档位逐档做正文余量校验 |
 | `default_level` | — | 默认档位名（须命中 levels 表，否则加载时报配置错误），其 budget 作为请求默认，优先于 `budget_tokens` |
 
-启用时要求 `max_tokens - budget_tokens ≥ 2048`（给正文留最小余量，否则思考会吃满配额、正文零输出），不满足会在加载时报配置错误；自定义 levels 逐档同规则校验。
+启用时要求 `max_tokens - budget_tokens ≥ 2048`（给正文留最小余量，否则思考会吃满配额、正文零输出），不满足会在加载时报配置错误；自定义 levels 逐档同规则校验。默认 `max_tokens`（65536）对内置 high 档（32000）余量充足，开箱不会踩坑。
 
-运行时可用 `/think` 会话级切换档位（选择器/直切/off），见[交互使用](./interactive.md)。
+运行时可用 `/think` 会话级切换档位（选择器/直切/off），见[交互使用](./interactive.md)。切到的档位若在当前 `max_tokens` 下正文余量不足（`max_tokens - 档位 budget < 2048`），切换时会即时给出预算警告提示（不阻止切换），提醒调大 `max_tokens` 或降低思考档位——避免发出请求后思考吃满预算、正文零输出而报「空响应」。
+
+> 若确实遇到「空响应 / 思考消耗了全部输出预算」提示：说明当前思考档位的 budget 逼近 `max_tokens`，正文没有生成空间。调大 `max_tokens`，或用 `/think` 降低思考档位即可。
 
 > `[thinking]` 段只对 **anthropic 协议**有效（`budget_tokens` 是 Anthropic 字段）。openai / openai_responses 协议下阶跃恒思考、无需也不发送该字段，此段配置被忽略；思考过程仍会正常渲染。
 
