@@ -1,6 +1,7 @@
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { runAgent, type AgentEvent } from '../agent/loop.js';
+import type { AgentsMdTruncation } from '../agent/agentsMd.js';
 import { estimateTokens, fullCompact } from '../agent/compaction/compact.js';
 import { runReflect } from '../agent/reflect.js';
 import type { LoopHooks } from '../agent/hooks.js';
@@ -73,6 +74,10 @@ export interface AppProps {
   systemPrefix: string;
   /** AGENTS.md 汇总内容（空串 = 无，组合时省略）。 */
   agentsMd: string;
+  /** AGENTS.md 预算裁减明细（空数组 = 未发生）；启动时一次性提示用户。 */
+  agentsMdTruncated: AgentsMdTruncation[];
+  /** 当前生效的 AGENTS.md 总字节预算（提示文案展示用）。 */
+  agentsMdMaxBytes: number;
   /** 当前 skill 注册表持有者：/skill reload 或 turn 边界指纹检测后整体换引用。 */
   skillsRef: { current: SkillRegistry };
   /** 重扫 skill 目录：force=false 且指纹未变时返回 null（零成本），否则全量重建并返回 diff。 */
@@ -101,6 +106,8 @@ export function App({
   provider,
   systemPrefix,
   agentsMd,
+  agentsMdTruncated,
+  agentsMdMaxBytes,
   skillsRef,
   reloadSkills,
   ctx,
@@ -164,6 +171,11 @@ export function App({
   // 上下文窗口大小做成 state：/model 切别名时跟随别名的 maxContextSize（压缩判定与状态栏共用）。
   const [maxContextSize, setMaxContextSize] = useState(initialMaxContextSize);
   const [busy, setBusy] = useState(false);
+  // 本回合忙碌起始时间戳（busy 上升沿设，供 WorkingStatus 显示 elapsed）。0 = 未忙碌。
+  const [turnStartAt, setTurnStartAt] = useState(0);
+  // 本回合流式产出的字符数（text 事件累加，busy 上升沿清零）：/4 估 output token 供 WorkingStatus 显示。
+  const turnOutputCharsRef = useRef(0);
+  const [turnOutputChars, setTurnOutputChars] = useState(0);
   const [mode, setMode] = useState<PermissionMode>(initialMode);
   // 界面语言：值本身不进渲染（t() 读模块级 locale），setState 只为触发整树重渲。初始取配置。
   const [, setLang] = useState<Locale>(config.language ?? 'zh');
@@ -183,6 +195,8 @@ export function App({
   // 当前生效渠道名（预设名或自定义渠道的 type）：/provider、/model 别名切换时同步，/think 门控据此判定。
   const providerNameRef = useRef(config.provider);
   const modeRef = useRef(initialMode);
+  // 当前模型 id 的 ref（persist 落盘用，避免闭包读陈旧 state；applyModelAlias 切换时同步）
+  const modelRef = useRef(initialModel);
   const planModeRef = useRef(false);
   const history = useRef<StoredMessage[]>(session.messages.slice());
   const sessionRef = useRef<SessionData>(session);
@@ -302,6 +316,10 @@ export function App({
     sessionRef.current.todos = [...todos.current];
     // goal 快照随会话落盘（无 goal 时清掉旧字段）
     sessionRef.current.goal = goal.current.snapshot() ?? undefined;
+    // 权限模式与模型随会话落盘（会话级状态，恢复时读回）：从 ref 取当前值，
+    // 避免闭包读到陈旧 state；切换点只需保证调用 persist 即生效。
+    sessionRef.current.mode = modeRef.current;
+    sessionRef.current.model = modelRef.current;
     try {
       store.save(sessionRef.current);
       // 全量历史日志：按 id 去重追加 history.current 中尚未写过的消息。
@@ -345,6 +363,36 @@ export function App({
     const note = skillConflictNote();
     if (note !== null) pushItem({ kind: 'note', text: note });
   }, [skillConflictNote, pushItem]);
+
+  // 子 agent 全部终态：摘要冻结进历史（scrollback 留痕可回看），动态面板随即撤下，
+  // 不在动态区驻留到回合末——运行进度由面板承担，完成结果由历史承担。
+  // 下一波子 agent 启动时会重建面板，每波各留一条摘要。
+  useEffect(() => {
+    if (subagents.length === 0) return;
+    if (subagents.some((a) => a.status === 'running' || a.status === 'queued')) return;
+    pushItem({ kind: 'note', text: formatAgentGroupSummary(subagents) });
+    setSubagents([]);
+  }, [subagents, pushItem]);
+
+  // 启动时一次性提示 AGENTS.md 预算裁减：哪些文件被截断/整篇丢弃、原始多大。
+  // AGENTS.md 会话内不变（启动加载一次，无 watcher），逐轮提示是噪音，故只在挂载时报一次。
+  useEffect(() => {
+    if (agentsMdTruncated.length === 0) return;
+    const kb = (n: number): string => (n / 1024).toFixed(1);
+    const lines = agentsMdTruncated.map((tr) =>
+      tr.keptBytes > 0
+        ? t('app.agentsMd.truncated.line', {
+            path: tr.path,
+            original: kb(tr.originalBytes),
+            kept: kb(tr.keptBytes),
+          })
+        : t('app.agentsMd.dropped.line', { path: tr.path, original: kb(tr.originalBytes) }),
+    );
+    pushItem({
+      kind: 'note',
+      text: `${t('app.agentsMd.truncated.header', { budget: kb(agentsMdMaxBytes) })}\n${lines.join('\n')}`,
+    });
+  }, [agentsMdTruncated, agentsMdMaxBytes, pushItem]);
 
   // SessionStart hook：会话创建/恢复后触发一次，stdout 注入会话上下文（拼进后续 runAgent 的 system 尾部）；
   // hook 执行可见性 notice 挂到转录区 note 条目

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { StoredMessage } from '../agent/message.js';
 import type { GoalState } from '../agent/goal/mode.js';
+import type { PermissionMode } from '../agent/permission/mode.js';
 import { AttachmentStore, isStepref } from './attachments.js';
 
 export interface SessionMeta {
@@ -28,6 +29,8 @@ export interface SessionData extends SessionMeta {
   todos?: { title: string; status: 'pending' | 'in_progress' | 'done' }[];
   /** goal 状态快照（随会话持久化；恢复时 active 降级 paused，fork 不继承）。 */
   goal?: GoalState;
+  /** 权限模式快照（会话级，随会话持久化；恢复时读回，旧快照缺失回退启动默认）。 */
+  mode?: PermissionMode;
 }
 
 /** 把工作目录映射为稳定、文件系统安全的短键（避免超长路径与非法字符）。 */
@@ -127,7 +130,7 @@ export class SessionStore {
   }
 
   /** 新建一个空会话（尚未落盘）。 */
-  create(cwd: string, model: string): SessionData {
+  create(cwd: string, model: string, mode?: PermissionMode): SessionData {
     const now = new Date().toISOString();
     return {
       id: randomId(),
@@ -137,6 +140,7 @@ export class SessionStore {
       updatedAt: now,
       messageCount: 0,
       messages: [],
+      mode,
     };
   }
 

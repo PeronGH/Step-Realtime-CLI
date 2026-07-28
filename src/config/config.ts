@@ -159,7 +159,9 @@ export interface StepCodeConfig {
   language?: Locale;
   /** AGENTS.md 自定义加载路径（config.toml agents_paths）。配置后完全覆盖默认的用户级+项目级收集；文件直读、目录取 AGENTS.md / agents.md。支持 `~` 与相对 cwd 的路径。 */
   agentsPaths?: string[];
-  /** skills 追加扫描目录（config.toml extra_skill_dirs，对齐 某竞品 同名概念）。追加在默认路径之后、plugin 之前扫描，同名 skill 追加目录胜出。支持 `~` 与相对 cwd 的路径。 */
+  /** AGENTS.md 总字节预算（config.toml agents_md_max_bytes，UTF-8 字节计）。缺省 32KB；0 或负数 = 禁用 AGENTS.md 加载。非法值（非数字）时键不进结果对象。 */
+  agentsMdMaxBytes?: number;
+  /** skills 追加扫描目录（config.toml extra_skill_dirs）。追加在默认路径之后、plugin 之前扫描，同名 skill 追加目录胜出。支持 `~` 与相对 cwd 的路径。 */
   extraSkillDirs?: string[];
   /** 按名排除的 skill 清单（config.toml disabled_skills）。合并完成后统一过滤，任何来源的同名 skill 都不加载；用于屏蔽不归你管的目录（团队共享 .agents/skills 等）里的个别 skill。 */
   disabledSkills?: string[];
@@ -294,6 +296,7 @@ interface TomlConfigShape {
   thinking?: unknown;
   language?: unknown;
   agents_paths?: unknown;
+  agents_md_max_bytes?: unknown;
   extra_skill_dirs?: unknown;
   disabled_skills?: unknown;
   models?: unknown;

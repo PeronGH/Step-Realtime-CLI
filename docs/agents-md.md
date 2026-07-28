@@ -15,7 +15,7 @@ AGENTS.md 是给模型看的项目/个人规范文件。step-code 启动会话�
 .step-code/AGENTS.md  →  AGENTS.override.md  →  AGENTS.md  →  agents.md
 ```
 
-所有命中的文件按「用户级在前、项目级从根到叶」的顺序拼接，每份前加 `<!-- From: <绝对路径> -->` 注释头。越靠近当前目录的文件位置越靠后，模型视角下更具体的规范优先。总量预算 32KB，超出时叶子优先分配、UTF-8 安全截断。
+所有命中的文件按「用户级在前、项目级从根到叶」的顺序拼接，每份前加 `<!-- From: <绝对路径> -->` 注释头。越靠近当前目录的文件位置越靠后，模型视角下更具体的规范优先。总量预算默认 32KB（`agents_md_max_bytes` 可调，`0` = 禁用加载），超出时叶子优先分配、UTF-8 安全截断；发生截断或整篇丢弃时，启动后会在转录区一次性提示哪些文件受影响、原始多大。
 
 ## 单层覆盖：AGENTS.override.md
 
@@ -34,13 +34,13 @@ agents_paths = ["~/my-rules/AGENTS.md", "./team-docs"]
 - 条目指向 `.md` 文件：直接读取
 - 条目指向目录：取其下 `AGENTS.override.md` → `AGENTS.md` → `agents.md` 第一个命中
 - 路径支持 `~` 展开和相对当前工作目录
-- 靠后的条目在 32KB 预算分配中更优先
+- 靠后的条目在预算分配中更优先
 
 这是逃生门而不是日常入口：配置后团队规范、用户级默认全部失效，加载来源完全由你显式声明。日常共存需求（个人 + 团队都要）不需要它——用户级文件本来就是私有的，默认就会加载。
 
 ## 与其他工具的关系
 
-step-code 的收集结构（用户级 + 项目级逐层、From 注释头、32KB 预算）与 某竞品CLI 一致，`AGENTS.override.md` 约定与 Codex 一致。同一份 `~/.agents/AGENTS.md` 可以被多个 agent 工具共享。
+step-code 的收集结构（用户级 + 项目级逐层、From 注释头、预算默认 32KB）与 某竞品CLI 一致，`AGENTS.override.md` 约定与 Codex 一致；预算可调与截断提示则参考 Codex 的 `project_doc_max_bytes`（含 `0` = 禁用）并补上了两家都没有的启动提示。同一份 `~/.agents/AGENTS.md` 可以被多个 agent 工具共享。
 
 ## 维护建议
 

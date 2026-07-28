@@ -274,6 +274,9 @@ const zh = {
   'app.skill.autoReload': '检测到技能目录变更，已自动重载：新增 [{added}] · 移除 [{removed}] · 变更 [{changed}]',
   'app.skill.conflict.header': '同名技能冲突 {count} 项，已按优先级采用（plugin > 追加目录 > 项目 .step-code/skills > 项目 .agents/skills > 用户级）：',
   'app.skill.conflict.line': '「{name}」采用 {winner}，覆盖 {losers}',
+  'app.agentsMd.truncated.header': 'AGENTS.md 超出总量预算（{budget} KB），以下内容未完整注入 system prompt（可调大 config.toml 的 agents_md_max_bytes）：',
+  'app.agentsMd.truncated.line': '{path}（原始 {original} KB，仅注入前 {kept} KB）',
+  'app.agentsMd.dropped.line': '{path}（原始 {original} KB，预算耗尽，整篇未注入）',
   'app.agent.activityError': '错误:{message}',
 
   // --- App /plugin 管理命令与 plugin 命名空间命令 ---
@@ -600,6 +603,9 @@ const en: Record<keyof typeof zh, string> = {
   'app.skill.autoReload': 'Skill directory changed, auto-reloaded: added [{added}] · removed [{removed}] · changed [{changed}]',
   'app.skill.conflict.header': '{count} skill name conflict(s); resolved by priority (plugin > extra dirs > project .step-code/skills > project .agents/skills > user-level):',
   'app.skill.conflict.line': '"{name}": using {winner}, overriding {losers}',
+  'app.agentsMd.truncated.header': 'AGENTS.md exceeds the total budget ({budget} KB); the following was not fully injected into the system prompt (raise agents_md_max_bytes in config.toml):',
+  'app.agentsMd.truncated.line': '{path} (original {original} KB, only first {kept} KB injected)',
+  'app.agentsMd.dropped.line': '{path} (original {original} KB, budget exhausted, entirely skipped)',
   'app.agent.activityError': 'error:{message}',
 
   // --- App /plugin management & plugin-namespaced commands ---

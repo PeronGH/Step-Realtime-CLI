@@ -5,7 +5,9 @@
  * 每层候选优先级：.step-code/AGENTS.md → AGENTS.override.md → AGENTS.md → agents.md
  * （AGENTS.override.md 是个人本地覆盖约定，对齐 Codex，不入库即可压住同层团队规范）。
  * 每份前加 `<!-- From: <绝对路径> -->` 注释头后拼接，供 system prompt 尾部注入。
- * 总量预算 32KB，叶子优先分配（离 cwd 越近越先分），超限 UTF-8 安全截断。
+ * 总量预算默认 32KB（config.toml agents_md_max_bytes 可调，0 = 禁用加载），
+ * 叶子优先分配（离 cwd 越近越先分），超限 UTF-8 安全截断。
+ * 截断/丢弃明细随返回值带出，供启动时一次性提示用户。
  * config.toml 的 agents_paths 可完全覆盖上述收集。
  * 会话启动时加载一次，不做 watcher。
  */
@@ -13,11 +15,24 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-/** AGENTS.md 总字节预算（按 UTF-8 字节数计） */
-const BUDGET_BYTES = 32 * 1024;
+/** AGENTS.md 默认总字节预算（按 UTF-8 字节数计）；与同类 CLI agent 的通行默认值一致 */
+export const DEFAULT_AGENTS_MD_BUDGET_BYTES = 32 * 1024;
 
 /** 截断后在末尾追加的省略标记 */
 const TRUNCATED_MARK = '\n…';
+
+/** 一份被预算裁掉的文件明细：keptBytes = 0 表示整篇丢弃（连注释头都放不下或预算已耗尽）。 */
+export interface AgentsMdTruncation {
+  path: string;
+  originalBytes: number;
+  keptBytes: number;
+}
+
+/** loadAgentsMd 的返回：拼接文本 + 截断/丢弃明细（未发生裁减时为空数组）。 */
+export interface AgentsMdResult {
+  text: string;
+  truncated: AgentsMdTruncation[];
+}
 
 /** 收集到的一份文件：绝对路径 + 正文 */
 interface AgentsMdEntry {
@@ -111,8 +126,19 @@ function utf8Truncate(s: string, maxBytes: number): string {
  * 输出顺序：用户级在前，项目级从根到叶；全都没有返回空串。
  * customPaths（config.toml agents_paths）非空时走覆盖模式：跳过默认收集，
  * 只按配置顺序读取（文件直读，目录取 AGENTS.md / agents.md），越靠后的条目预算越优先。
+ * budgetBytes（config.toml agents_md_max_bytes）默认 32KB；0 或负数 = 禁用加载（返回空，不算截断）。
+ * 发生截断/整篇丢弃时明细记入返回值的 truncated，供调用方提示用户。
  */
-export function loadAgentsMd(cwd: string, homeDir: string = homedir(), customPaths?: string[]): string {
+export function loadAgentsMd(
+  cwd: string,
+  homeDir: string = homedir(),
+  customPaths?: string[],
+  budgetBytes: number = DEFAULT_AGENTS_MD_BUDGET_BYTES,
+): AgentsMdResult {
+  const empty: AgentsMdResult = { text: '', truncated: [] };
+  // 0 / 负数 = 禁用加载（对齐 Codex project_doc_max_bytes = 0 的语义）
+  const budget = Math.floor(budgetBytes);
+  if (budget <= 0) return empty;
   let entries: AgentsMdEntry[];
   if (customPaths !== undefined && customPaths.length > 0) {
     entries = [];
@@ -138,30 +164,43 @@ export function loadAgentsMd(cwd: string, homeDir: string = homedir(), customPat
       if (e !== null) entries.push(e);
     }
   }
-  if (entries.length === 0) return '';
+  if (entries.length === 0) return empty;
 
   // 叶子优先分配预算：倒序决定每份能拿到的字节数，输出顺序不变
   // 计入预算的含注释头、正文与条目间的 \n\n 连接符（除首个收录条目外每个 +2 字节）
   const parts: (string | null)[] = new Array<string | null>(entries.length).fill(null);
-  let remaining = BUDGET_BYTES;
+  const truncated: AgentsMdTruncation[] = [];
+  let remaining = budget;
   let included = 0;
-  for (let i = entries.length - 1; i >= 0 && remaining > 0; i--) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const originalBytes = Buffer.byteLength(entries[i].content, 'utf8');
+    if (remaining <= 0) {
+      // 预算已耗尽：更上层的文件整篇丢弃（不注入残文），但记入明细提示用户
+      truncated.push({ path: entries[i].path, originalBytes, keptBytes: 0 });
+      continue;
+    }
     const sepBytes = included > 0 ? 2 : 0;
     const header = `<!-- From: ${entries[i].path} -->\n`;
     const headerBytes = Buffer.byteLength(header, 'utf8');
-    const contentBytes = Buffer.byteLength(entries[i].content, 'utf8');
-    if (headerBytes + contentBytes + sepBytes <= remaining) {
+    if (headerBytes + originalBytes + sepBytes <= remaining) {
       parts[i] = header + entries[i].content;
-      remaining -= headerBytes + contentBytes + sepBytes;
+      remaining -= headerBytes + originalBytes + sepBytes;
       included++;
     } else {
       // 预算不足：给省略标记预留字节后对正文做 UTF-8 安全截断；连头都放不下则整篇丢弃
       const contentBudget = remaining - headerBytes - Buffer.byteLength(TRUNCATED_MARK, 'utf8') - sepBytes;
       if (contentBudget > 0) {
-        parts[i] = header + utf8Truncate(entries[i].content, contentBudget) + TRUNCATED_MARK;
+        const kept = utf8Truncate(entries[i].content, contentBudget);
+        parts[i] = header + kept + TRUNCATED_MARK;
+        truncated.push({ path: entries[i].path, originalBytes, keptBytes: Buffer.byteLength(kept, 'utf8') });
+        included++;
+      } else {
+        truncated.push({ path: entries[i].path, originalBytes, keptBytes: 0 });
       }
       remaining = 0;
     }
   }
-  return parts.filter((p): p is string => p !== null).join('\n\n');
+  // 明细按输出顺序（根 → 叶）返回，与拼接文本的阅读顺序一致
+  truncated.reverse();
+  return { text: parts.filter((p): p is string => p !== null).join('\n\n'), truncated };
 }

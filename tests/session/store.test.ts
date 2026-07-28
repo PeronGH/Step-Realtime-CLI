@@ -134,6 +134,33 @@ describe('SessionStore', () => {
     expect(store.load(cwd, plain.id)!.goal).toBeUndefined();
   });
 
+  it('permission mode 随会话 save/load 往返；旧快照缺失读出 undefined', () => {
+    const s = store.create(cwd, 'm', 'yolo');
+    expect(s.mode).toBe('yolo');
+    store.save(s);
+    expect(store.load(cwd, s.id)!.mode).toBe('yolo');
+    // 切换后再存读回新值
+    const loaded = store.load(cwd, s.id)!;
+    loaded.mode = 'auto';
+    store.save(loaded);
+    expect(store.load(cwd, s.id)!.mode).toBe('auto');
+    // 不带 mode 创建的会话读出为 undefined（恢复时由调用方回退启动默认）
+    const plain = store.create(cwd, 'm');
+    store.save(plain);
+    expect(store.load(cwd, plain.id)!.mode).toBeUndefined();
+  });
+
+  it('model 随会话 save/load 往返（恢复时不再被 config 覆盖）', () => {
+    const s = store.create(cwd, 'step-3.5-flash');
+    store.save(s);
+    expect(store.load(cwd, s.id)!.model).toBe('step-3.5-flash');
+    // 切换模型后落盘读回新值
+    const loaded = store.load(cwd, s.id)!;
+    loaded.model = 'step-3.7-flash';
+    store.save(loaded);
+    expect(store.load(cwd, s.id)!.model).toBe('step-3.7-flash');
+  });
+
   it('latest 返回最近更新的会话', async () => {
     const a = store.create(cwd, 'm');
     store.save(a);
