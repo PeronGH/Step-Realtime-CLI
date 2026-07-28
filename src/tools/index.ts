@@ -18,6 +18,7 @@ import { todoListTool } from './todoList.js';
 import { toolSearchTool } from './toolSearch.js';
 import { fail, type ToolContext, type ToolDef, type ToolResult } from './types.js';
 import type { ToolAccess } from './access.js';
+import { webFetchTool } from './webFetch.js';
 import { webSearchTool } from './webSearch.js';
 import { workflowTool } from './workflow.js';
 import { writeFileTool } from './write.js';
@@ -32,6 +33,7 @@ const ALL_TOOLS: ToolDef<any>[] = [
   grepTool,
   bashTool,
   webSearchTool,
+  webFetchTool,
   imageSearchTool,
   spawnAgentTool,
   exitPlanModeTool,
