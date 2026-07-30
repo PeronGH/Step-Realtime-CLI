@@ -13,7 +13,7 @@
 - 交互式 Ink 终端界面 + 单条指令的非交互模式（`-p`）
 - **多协议模型接入**：provider 层支持三种协议——`anthropic`（Anthropic Messages，适合 coding）、`openai`（OpenAI Chat Completions，适合 coding）、`openai_responses`（OpenAI Responses，纯对话、不支持工具调用）；阶跃 Step 系列（如 step-3.7-flash）三协议均可接入，默认走 stepfun 预设（anthropic 协议、流式输出、注入 prompt cache）
 - **多渠道模型体系**：config.toml 用 `[providers.<id>]` 声明渠道（`type` 选协议 + `base_url` + `api_key`）、`[models.<别名>]` 登记模型别名（挂渠道、带显示名/能力/上下文窗口）；`/model` 无参打开交互式选择器（模糊过滤、渠道列、当前项标记、切换有历史时提示 cache 失效），`/model <别名>` 直切，`--model 别名` 启动指定
-- **thinking 推理过程**：Step 恒思考模型的思考过程在 TUI 无条件呈现——流式期暗色滚动预览、完成后暗色斜体折叠块；`[thinking]` 段可配是否发送思考请求字段及 budget，`/think` 会话级选择思考深度档位（`[thinking.levels]` 档位表可配），状态栏显示当前档位；`-p` 模式思考不进 stdout
+- **thinking 推理过程**：Step 恒思考模型的思考过程在 TUI 无条件呈现——流式期暗色滚动预览、完成后暗色斜体折叠块；模型只回思考签名、不回思考正文时也显示「思考中…」，与卡住区分开；`[thinking]` 段可配是否发送思考请求字段及 budget，`/think` 会话级选择思考深度档位（`[thinking.levels]` 档位表可配），状态栏显示当前档位；`-p` 模式思考不进 stdout
 - **计划模式（Plan Mode）**：`/plan` 进入后权限层硬拦所有写/执行工具，只放行只读调查与 `exit_plan_mode`；模型先调查、产出计划，经用户确认后才落地执行。它是独立维度，叠加在权限模式之上
 - **权限系统**：manual / auto / yolo 三档梯度——manual 写与执行都要确认，auto 写放行、`bash` 仍需确认，yolo 全放行；本会话批准过的工具可记住
 - **子 agent**：`spawn_agent` 派生子 agent（内置 `general` 全能 / `explore` 只读，支持 `.step-code/agents/*.md` 自定义）；全新上下文、角色化工具白名单、摘要回灌，可后台异步、可并行多个只读 explore
